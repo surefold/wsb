@@ -22,7 +22,9 @@ use std::collections::{BTreeSet, HashMap};
 use watershed_core::{BinOp, Type, UnOp};
 
 use crate::diagnostic::{Diagnostic, did_you_mean};
-use crate::syntax::{self, BinaryOp, Expr, ExprKind, Ident, Item, Member, Span, UnaryOp};
+use crate::syntax::{
+    self, BinaryOp, Expr, ExprKind, Ident, Item, Member, Span, TemplatePart, UnaryOp,
+};
 
 /// A setting every module has.
 pub struct Setting {
@@ -422,13 +424,15 @@ impl Checker {
                         version,
                         span,
                     } => {
-                        let ExprKind::Str(text) = &coordinate.kind else {
+                        let (text, templated) = coordinate_text(coordinate)?;
+                        if let (Some(_), Some(expr)) = (&templated, version) {
                             return Err(Diagnostic::new(
-                                "a dependency's coordinate must be written out as a string",
-                                coordinate.span.clone(),
+                                "this dependency has two versions",
+                                expr.span.clone(),
                             )
-                            .help("put a computed version second: `dependency(\"group:artifact\", version)`"));
-                        };
+                            .help("drop the version from the coordinate, or this one"));
+                        }
+                        let version = templated.as_ref().or(version.as_ref());
                         let parts: Vec<&str> = text.split(':').collect();
                         if parts.iter().any(|p| p.trim().is_empty())
                             || !(2..=3).contains(&parts.len())
@@ -593,6 +597,29 @@ impl Checker {
             ExprKind::Double(d) => Ok((Plan::Double(d.to_bits()), Type::F64)),
             ExprKind::Bool(b) => Ok((Plan::Bool(*b), Type::Bool)),
             ExprKind::Str(s) => Ok((Plan::Str(s.clone()), Type::Str)),
+            // Each piece as text, joined left to right.
+            ExprKind::Template(parts) => {
+                let mut joined: Option<Plan> = None;
+                for part in parts {
+                    let piece = match part {
+                        TemplatePart::Text(s) => Plan::Str(s.clone()),
+                        TemplatePart::Expr(inner) => {
+                            let (plan, ty) = self.expr(inner, scope)?;
+                            if ty == Type::Str {
+                                plan
+                            } else {
+                                Plan::Unary(UnOp::ToText, Box::new(plan))
+                            }
+                        }
+                    };
+                    joined = Some(match joined {
+                        None => piece,
+                        Some(left) => Plan::Binary(BinOp::Concat, Box::new(left), Box::new(piece)),
+                    });
+                }
+                let plan = joined.expect("a template has at least one part");
+                Ok((plan, Type::Str))
+            }
             ExprKind::Name(module, name) => {
                 let node = self.lookup(module.as_ref(), name, scope)?;
                 let ty = self.resolve(&node, Some(&e.span))?;
@@ -632,11 +659,12 @@ impl Checker {
                         d = d.help("Int and Double are not mixed silently; write the Int as a Double, such as `2.0`");
                     }
                     if op == &BinaryOp::Add && (ta == Type::Str || tb == Type::Str) {
-                        d = d.help("joining strings is not supported yet");
+                        d = d.help("to join other types to a string, use a template: `\"$a$b\"`");
                     }
                     return Err(d);
                 }
                 let (bin, ok, result) = match op {
+                    BinaryOp::Add if ta == Type::Str => (BinOp::Concat, true, ta),
                     BinaryOp::Add => (BinOp::Add, ta.is_numeric(), ta),
                     BinaryOp::Sub => (BinOp::Sub, ta.is_numeric(), ta),
                     BinaryOp::Mul => (BinOp::Mul, ta.is_numeric(), ta),
@@ -651,14 +679,10 @@ impl Checker {
                     BinaryOp::Or => (BinOp::Or, ta == Type::Bool, Type::Bool),
                 };
                 if !ok {
-                    let mut d = Diagnostic::new(
+                    return Err(Diagnostic::new(
                         format!("`{}` cannot be applied to {}", op.symbol(), plural(ta)),
                         e.span.clone(),
-                    );
-                    if op == &BinaryOp::Add && ta == Type::Str {
-                        d = d.help("joining strings is not supported yet");
-                    }
-                    return Err(d);
+                    ));
                 }
                 Ok((Plan::Binary(bin, Box::new(pa), Box::new(pb)), result))
             }
@@ -929,4 +953,52 @@ fn a_type(ty: Type) -> String {
 
 fn plural(ty: Type) -> String {
     format!("{}s", type_name(ty))
+}
+
+/// A dependency's coordinate as plain text for checking and, if it is a
+/// template, its version as an expression. The group and artifact name the
+/// dependency, so they have to be known without working anything out.
+fn coordinate_text(coordinate: &Expr) -> Result<(String, Option<Expr>), Diagnostic> {
+    let parts = match &coordinate.kind {
+        ExprKind::Str(text) => return Ok((text.clone(), None)),
+        ExprKind::Template(parts) => parts,
+        _ => {
+            return Err(Diagnostic::new(
+                "a dependency's coordinate must be written out as a string",
+                coordinate.span.clone(),
+            )
+            .help("put a computed version second: `dependency(\"group:artifact\", version)`"));
+        }
+    };
+    let written_out = || {
+        Diagnostic::new(
+            "a dependency's group and artifact must be written out",
+            coordinate.span.clone(),
+        )
+        .help("only the version can be computed: `\"group:artifact:$version\"`")
+    };
+    let Some(TemplatePart::Text(prefix)) = parts.first() else {
+        return Err(written_out());
+    };
+    let fields: Vec<&str> = prefix.splitn(3, ':').collect();
+    let [group, artifact, start] = fields[..] else {
+        return Err(written_out());
+    };
+    let mut version = Vec::with_capacity(parts.len());
+    if !start.is_empty() {
+        version.push(TemplatePart::Text(start.to_string()));
+    }
+    version.extend(parts[1..].iter().cloned());
+    let has_colon = |p: &TemplatePart| matches!(p, TemplatePart::Text(t) if t.contains(':'));
+    if version.iter().any(has_colon) {
+        return Err(
+            Diagnostic::new("this is not a Maven coordinate", coordinate.span.clone())
+                .help("write `\"group:artifact:version\"`, with no `:` in the version"),
+        );
+    }
+    let expr = Expr {
+        kind: ExprKind::Template(version),
+        span: coordinate.span.clone(),
+    };
+    Ok((format!("{group}:{artifact}"), Some(expr)))
 }

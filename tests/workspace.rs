@@ -205,6 +205,9 @@ fn any_sequence_of_edits_ends_where_loading_the_last_file_would() {
         "val a = b + 1\nval b = 1\nmodule m { jvmTarget = a }".to_string(),
         "val a = 1\nval b = a + 1\nmodule m { jvmTarget = b }".to_string(),
         "val a = 1\nval b = \"x\"\nmodule m { kotlin = b }".to_string(),
+        // Templates: their pieces change, and so does what they read.
+        "val a = 1\nval b = \"x$a\"\nmodule m { kotlin = b + \"!\" }".to_string(),
+        "val a = 2\nval b = \"y${a + 1}\"\nmodule m { kotlin = \"$b$b\" }".to_string(),
     ];
     let mut rng: u64 = 7;
     for run in 0..300 {
@@ -289,4 +292,169 @@ fn a_dependency_needs_exactly_one_version() {
     assert_eq!(message, "this dependency has two versions");
     let (message, _) = error("module a { dependency(\"g:a:1\")\n dependency(\"g:a:2\") }");
     assert_eq!(message, "dependency `g:a` is defined twice");
+}
+
+// ---------------------------------------------------------------- strings
+
+fn one(src: &str, name: &str) -> String {
+    let w = Workspace::new(src, &no_env).unwrap();
+    value(&w, name)
+}
+
+#[test]
+fn plus_joins_strings() {
+    assert_eq!(one("val a = \"x\" + \"y\" + \"z\"", "a"), "\"xyz\"");
+}
+
+#[test]
+fn a_template_fills_in_names_and_expressions() {
+    let src = "val v = 3\nval s = \"a$v-${v + 1}!\"";
+    assert_eq!(one(src, "s"), "\"a3-4!\"");
+}
+
+#[test]
+fn a_template_of_only_a_string_is_that_string() {
+    assert_eq!(one("val a = \"x\"\nval b = \"$a\"", "b"), "\"x\"");
+}
+
+#[test]
+fn a_template_shows_every_type_as_kotlin_would() {
+    let src = "val s = \"${2.0} ${1.5} ${-3} ${true}\"";
+    assert_eq!(one(src, "s"), "\"2.0 1.5 -3 true\"");
+}
+
+#[test]
+fn a_short_template_stops_at_the_name() {
+    let src = "module core { jvmTarget = 21 }\nval a = \"x\"\nval s = \"$a.b ${core.jvmTarget}\"";
+    assert_eq!(one(src, "s"), "\"x.b 21\"");
+}
+
+#[test]
+fn a_dollar_that_starts_nothing_is_just_a_dollar() {
+    assert_eq!(one(r#"val s = "5$ and \$x""#, "s"), r#""5$ and $x""#);
+}
+
+#[test]
+fn a_template_can_hold_strings_and_conditions() {
+    let src = r#"val ci = false
+val s = "${if (ci) "fast" else "slow"}-${"in" + "ner"}""#;
+    assert_eq!(one(src, "s"), "\"slow-inner\"");
+}
+
+#[test]
+fn a_template_can_set_a_string_setting() {
+    let src = "val g = \"com.example\"\nmodule a { group = \"$g.core\" }";
+    assert_eq!(one(src, "a.group"), "\"com.example.core\"");
+}
+
+#[test]
+fn explain_shows_a_template_as_the_values_it_joins() {
+    let w = Workspace::new("val v = 3\nval s = \"a$v!\"", &no_env).unwrap();
+    let why = w.explain("s").unwrap();
+    assert!(
+        why.starts_with("s = \"a3!\"  ← \"a\" + text(v) + \"!\""),
+        "{why}"
+    );
+}
+
+#[test]
+fn a_dependency_version_can_be_a_template() {
+    let src = "val minor = 17\nmodule a { dependency(\"g:art:2.$minor.1\") }";
+    let w = Workspace::new(src, &no_env).unwrap();
+    assert_eq!(value(&w, "a.dependencies[g:art]"), "\"2.17.1\"");
+    let info = w.project().module("a").unwrap();
+    assert_eq!(info.dependencies[0].0, "g:art");
+}
+
+#[test]
+fn a_template_version_follows_the_value_it_uses() {
+    let src = "val v = \"1\"\nmodule a { dependency(\"g:art:$v\") }";
+    let mut w = Workspace::new(src, &no_env).unwrap();
+    let change = update(&mut w, &src.replace("\"1\"", "\"2\""));
+    assert_eq!(change.redefined, ["v"]);
+    assert_eq!(change.changed, ["v", "a.dependencies[g:art]"]);
+    assert_eq!(value(&w, "a.dependencies[g:art]"), "\"2\"");
+}
+
+#[test]
+fn editing_a_templates_text_works_out_only_that_value() {
+    let src = "val v = 3\nval s = \"a$v\"\nval t = \"b$v\"";
+    let mut w = Workspace::new(src, &no_env).unwrap();
+    let change = update(&mut w, &src.replace("\"a$v\"", "\"c$v\""));
+    assert_eq!(change.redefined, ["s"]);
+    assert_eq!(change.recalculated, 1);
+    assert_eq!(value(&w, "s"), "\"c3\"");
+}
+
+#[test]
+fn doubling_a_string_again_and_again_is_an_error_not_a_crash() {
+    let mut src = String::from("val v0 = \"xxxxxxxx\"\n");
+    for i in 1..80 {
+        src.push_str(&format!("val v{i} = \"$v{prev}$v{prev}\"\n", prev = i - 1));
+    }
+    let w = Workspace::new(&src, &no_env).unwrap();
+    assert!(
+        value(&w, "v79").contains("too long"),
+        "{}",
+        value(&w, "v79")
+    );
+}
+
+#[test]
+fn joining_a_string_to_a_number_suggests_a_template() {
+    let (message, help) = error("val a = \"x\" + 1");
+    assert!(message.contains("String + Int"), "{message}");
+    assert!(help.unwrap().contains("template"));
+}
+
+#[test]
+fn minus_is_still_refused_on_strings() {
+    let (message, _) = error("val a = \"x\" - \"y\"");
+    assert!(
+        message.contains("cannot be applied to Strings"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_name_in_a_template_is_checked_like_any_other() {
+    let (message, help) = error("val jackson = \"1\"\nval s = \"$jackon\"");
+    assert_eq!(message, "there is no value `jackon`");
+    assert_eq!(help.as_deref(), Some("did you mean `jackson`?"));
+}
+
+#[test]
+fn a_template_that_uses_its_own_value_is_a_loop() {
+    let (message, _) = error("val a = \"$b\"\nval b = \"${a}\"");
+    assert_eq!(message, "`a` depends on itself: a → b → a");
+}
+
+#[test]
+fn an_empty_template_is_an_error() {
+    let (message, _) = error("val s = \"${}\"");
+    assert_eq!(message, "expected a value, found `}`");
+}
+
+#[test]
+fn a_template_holds_one_expression() {
+    let (message, _) = error("val s = \"${1 2}\"");
+    assert_eq!(message, "expected `}` to end the template, found `2`");
+}
+
+#[test]
+fn a_template_never_closed_is_an_error() {
+    let (message, _) = error("val s = \"${1\nval t = 2");
+    assert_eq!(message, "this template is never closed");
+    let (message, _) = error("val s = \"${1");
+    assert_eq!(message, "this template is never closed");
+}
+
+#[test]
+fn a_dependencys_group_and_artifact_must_be_written_out() {
+    let (message, _) = error("val g = \"x\"\nmodule a { dependency(\"$g:art:1\") }");
+    assert!(message.contains("written out"), "{message}");
+    let (message, _) = error("val v = \"1\"\nmodule a { dependency(\"g:art:$v:x\") }");
+    assert!(message.contains("Maven coordinate"), "{message}");
+    let (message, _) = error("val v = \"1\"\nmodule a { dependency(\"g:art:$v\", \"2\") }");
+    assert_eq!(message, "this dependency has two versions");
 }

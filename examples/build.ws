@@ -6,11 +6,12 @@
 
 val ci = env("CI") == "true"
 val jackson = "2.17.1"
+val base = "com.example"
 
 // Every module gets these unless it sets its own.
 defaults {
     kotlin = "2.1.0"
-    group = "com.example"
+    group = base
     warningsAsErrors = ci
 }
 
@@ -28,6 +29,6 @@ module api {
 module app {
     dependsOn(core, api)
     jvmTarget = max(core.jvmTarget, api.jvmTarget)
-    mainClass = "com.example.app.MainKt"
-    dependency("com.fasterxml.jackson.module:jackson-module-kotlin", jackson)
+    mainClass = "$base.app.MainKt"
+    dependency("com.fasterxml.jackson.module:jackson-module-kotlin:$jackson")
 }
