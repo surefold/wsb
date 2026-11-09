@@ -208,6 +208,10 @@ fn any_sequence_of_edits_ends_where_loading_the_last_file_would() {
         // Templates: their pieces change, and so does what they read.
         "val a = 1\nval b = \"x$a\"\nmodule m { kotlin = b + \"!\" }".to_string(),
         "val a = 2\nval b = \"y${a + 1}\"\nmodule m { kotlin = \"$b$b\" }".to_string(),
+        // Lists, and dependencies that come and go with a condition.
+        "val a = listOf(\"x\")\nmodule m { freeCompilerArgs = a + \"y\" }".to_string(),
+        "val c = env(\"CI\") == \"true\"\nmodule m { if (c) dependency(\"g:a:1\") else dependency(\"g:a:2\") }".to_string(),
+        "val c = env(\"CI\") == \"true\"\nmodule m { if (!c) { dependency(\"g:a:1\"); dependency(\"g:b:1\") } }".to_string(),
     ];
     let mut rng: u64 = 7;
     for run in 0..300 {
@@ -363,7 +367,7 @@ fn a_dependency_version_can_be_a_template() {
     let w = Workspace::new(src, &no_env).unwrap();
     assert_eq!(value(&w, "a.dependencies[g:art]"), "\"2.17.1\"");
     let info = w.project().module("a").unwrap();
-    assert_eq!(info.dependencies[0].0, "g:art");
+    assert_eq!(info.dependencies[0].coordinate, "g:art");
 }
 
 #[test]
@@ -457,4 +461,222 @@ fn a_dependencys_group_and_artifact_must_be_written_out() {
     assert!(message.contains("Maven coordinate"), "{message}");
     let (message, _) = error("val v = \"1\"\nmodule a { dependency(\"g:art:$v\", \"2\") }");
     assert_eq!(message, "this dependency has two versions");
+}
+
+// ---------------------------------------------------------------- lists
+
+#[test]
+fn a_list_can_be_built_and_added_to() {
+    let src = "val a = listOf(\"x\", \"y\")\nval b = a + listOf(\"z\") + \"w\"";
+    assert_eq!(one(src, "b"), r#"["x", "y", "z", "w"]"#);
+    assert_eq!(one("val a = listOf()", "a"), "[]");
+}
+
+#[test]
+fn list_items_can_be_worked_out() {
+    let src = "val v = 3\nval a = listOf(\"-v$v\", if (v > 2) \"big\" else \"small\")";
+    assert_eq!(one(src, "a"), r#"["-v3", "big"]"#);
+}
+
+#[test]
+fn join_makes_one_string_from_a_list_in_the_language() {
+    let src = "val a = listOf(\"x\", \"y\")\nval s = join(a, \":\")";
+    assert_eq!(one(src, "s"), "\"x:y\"");
+}
+
+#[test]
+fn a_template_shows_a_list_as_kotlin_does() {
+    assert_eq!(
+        one("val a = listOf(\"x\", \"y\")\nval s = \"$a\"", "s"),
+        "\"[x, y]\""
+    );
+}
+
+#[test]
+fn a_list_setting_comes_from_defaults_or_the_module() {
+    let src = "defaults { freeCompilerArgs = listOf(\"-progressive\") }\nmodule a {}\nmodule b { freeCompilerArgs = a.freeCompilerArgs + \"-Werror\" }";
+    assert_eq!(one(src, "a.freeCompilerArgs"), r#"["-progressive"]"#);
+    assert_eq!(
+        one(src, "b.freeCompilerArgs"),
+        r#"["-progressive", "-Werror"]"#
+    );
+    assert_eq!(one("module a {}", "a.freeCompilerArgs"), "[]");
+}
+
+#[test]
+fn changing_one_list_item_reaches_what_uses_the_list() {
+    let src = "val v = \"1\"\nval a = listOf(v)\nval s = join(a, \",\")";
+    let mut w = Workspace::new(src, &no_env).unwrap();
+    let change = update(&mut w, &src.replace("\"1\"", "\"2\""));
+    assert_eq!(change.redefined, ["v"]);
+    assert_eq!(change.changed, ["v", "a", "s"]);
+    assert_eq!(value(&w, "s"), "\"2\"");
+}
+
+#[test]
+fn every_list_item_must_be_a_string() {
+    let (message, help) = error("val a = listOf(\"x\", 1)");
+    assert_eq!(
+        message,
+        "every item of a list must be a String, but this is an Int"
+    );
+    assert!(help.unwrap().contains("template"));
+}
+
+#[test]
+fn only_a_string_can_be_added_to_a_list() {
+    let (message, _) = error("val a = listOf(\"x\") + 1");
+    assert!(message.contains("List + Int"), "{message}");
+}
+
+#[test]
+fn join_needs_a_list_and_a_string_in_the_language() {
+    let (message, _) = error("val s = join(\"x\", \",\")");
+    assert_eq!(
+        message,
+        "`join` needs a List and a String, but got a String and a String"
+    );
+}
+
+#[test]
+fn a_misspelt_list_function_suggests_the_right_one() {
+    let (message, help) = error("val a = listof(\"x\")");
+    assert_eq!(message, "there is no function `listof`");
+    assert_eq!(help.as_deref(), Some("did you mean `listOf`?"));
+}
+
+// ---------------------------------------------------------------- conditional dependencies
+
+const CONDITIONAL: &str = r#"
+val ci = env("CI") == "true"
+module a {
+    dependency("g:always:1")
+    if (ci) {
+        dependency("g:only-ci:1")
+    } else {
+        dependency("g:only-local:2")
+    }
+}
+"#;
+
+fn deps(w: &Workspace, module: &str) -> Vec<String> {
+    w.active_dependencies(module)
+        .into_iter()
+        .map(|(c, v)| format!("{c}:{v}"))
+        .collect()
+}
+
+#[test]
+fn a_conditional_dependency_applies_only_when_its_condition_holds() {
+    let w = Workspace::new(CONDITIONAL, &no_env).unwrap();
+    assert_eq!(deps(&w, "a"), ["g:always:1", "g:only-local:2"]);
+    let w = Workspace::new(CONDITIONAL, &ci).unwrap();
+    assert_eq!(deps(&w, "a"), ["g:always:1", "g:only-ci:1"]);
+}
+
+#[test]
+fn a_change_of_condition_switches_dependencies_without_editing_the_file() {
+    let mut w = Workspace::new(CONDITIONAL, &no_env).unwrap();
+    let change = w.update(CONDITIONAL, &ci).unwrap();
+    w.graph().check_consistency().unwrap();
+    assert!(change.redefined.is_empty(), "the file did not change");
+    assert!(
+        change
+            .changed
+            .iter()
+            .any(|n| n == "a.dependencies[g:only-ci].enabled")
+    );
+    assert_eq!(deps(&w, "a"), ["g:always:1", "g:only-ci:1"]);
+}
+
+#[test]
+fn the_two_branches_of_an_if_can_choose_a_version() {
+    let src = "val ci = env(\"CI\") == \"true\"\nmodule a { if (ci) dependency(\"g:art:2\") else dependency(\"g:art:1\") }";
+    assert_eq!(
+        deps(&Workspace::new(src, &no_env).unwrap(), "a"),
+        ["g:art:1"]
+    );
+    assert_eq!(deps(&Workspace::new(src, &ci).unwrap(), "a"), ["g:art:2"]);
+}
+
+#[test]
+fn an_if_without_an_else_adds_nothing_when_false() {
+    let src = "module a { if (false) { dependency(\"g:art:1\") } }";
+    let w = Workspace::new(src, &no_env).unwrap();
+    assert!(deps(&w, "a").is_empty());
+    assert_eq!(w.project().module("a").unwrap().dependencies.len(), 1);
+}
+
+#[test]
+fn ifs_can_nest_and_chain() {
+    let src = r#"val n = 2
+module a {
+    if (n == 1) {
+        dependency("g:one:1")
+    } else if (n == 2) {
+        if (true) dependency("g:two:1")
+    } else {
+        dependency("g:other:1")
+    }
+}"#;
+    assert_eq!(
+        deps(&Workspace::new(src, &no_env).unwrap(), "a"),
+        ["g:two:1"]
+    );
+}
+
+#[test]
+fn a_conditional_dependency_can_use_module_values_and_templates() {
+    let src = "module a {\n  val v = \"7\"\n  if (true) dependency(\"g:art:1.$v\")\n}";
+    assert_eq!(
+        deps(&Workspace::new(src, &no_env).unwrap(), "a"),
+        ["g:art:1.7"]
+    );
+}
+
+#[test]
+fn explain_says_why_a_conditional_dependency_applies() {
+    let w = Workspace::new(CONDITIONAL, &ci).unwrap();
+    let why = w.explain("a.dependencies[g:only-ci].enabled").unwrap();
+    assert!(
+        why.starts_with("a.dependencies[g:only-ci].enabled = true  ← ci"),
+        "{why}"
+    );
+    assert!(why.contains("env.CI = \"true\"  (input)"), "{why}");
+}
+
+#[test]
+fn the_same_dependency_twice_on_one_path_is_an_error() {
+    let (message, _) =
+        error("module a { dependency(\"g:a:1\")\n if (true) dependency(\"g:a:2\") }");
+    assert_eq!(message, "dependency `g:a` is defined twice");
+    let (message, _) =
+        error("module a { if (true) { dependency(\"g:a:1\"); dependency(\"g:a:2\") } }");
+    assert_eq!(message, "dependency `g:a` is defined twice");
+    // Two separate `if`s could both be true.
+    let (message, _) =
+        error("module a { if (true) dependency(\"g:a:1\")\n if (false) dependency(\"g:a:2\") }");
+    assert_eq!(message, "dependency `g:a` is defined twice");
+}
+
+#[test]
+fn a_dependencys_condition_must_be_a_boolean() {
+    let (message, _) = error("module a { if (1) dependency(\"g:a:1\") }");
+    assert_eq!(message, "a condition must be a Boolean, but this is an Int");
+    let (message, _) =
+        error("module a { if (\"x\") dependency(\"g:a:1\") else dependency(\"g:b:1\") }");
+    assert_eq!(
+        message,
+        "a condition must be a Boolean, but this is a String"
+    );
+}
+
+#[test]
+fn only_dependencies_can_go_inside_an_if() {
+    let (message, help) = error("module a { if (true) { jvmTarget = 21 } }");
+    assert!(
+        message.starts_with("only `dependency(...)` can go inside"),
+        "{message}"
+    );
+    assert!(help.unwrap().contains("setting = if"));
 }

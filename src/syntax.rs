@@ -9,6 +9,8 @@
 //!           | 'val' NAME '=' expr
 //!           | 'dependsOn' '(' NAME (',' NAME)* ')'
 //!           | 'dependency' '(' expr (',' expr)? ')'
+//!           | 'if' '(' expr ')' block ('else' (block | if-member))?
+//! block    := '{' dep* '}' | dep          dep is a `dependency` or another `if`
 //! expr     := 'if' '(' expr ')' expr 'else' expr | or
 //! or       := and ('||' and)*
 //! and      := equality ('&&' equality)*
@@ -19,7 +21,7 @@
 //! unary    := ('!' | '-') unary | primary
 //! primary  := INT | DOUBLE | STRING | TEMPLATE | 'true' | 'false' | '(' expr ')'
 //!           | NAME ('.' NAME)?            a value, or another module's setting
-//!           | NAME '(' (expr (',' expr)*)? ')'   env, min, max or abs
+//!           | NAME '(' (expr (',' expr)*)? ')'   env, min, max, abs, listOf or join
 //! ```
 //!
 //! Lines end statements, as in Kotlin, so `;` is optional. Comments are
@@ -450,6 +452,9 @@ pub enum ExprKind {
     Unary(UnaryOp, Box<Expr>),
     Binary(BinaryOp, Box<Expr>, Box<Expr>),
     If(Box<Expr>, Box<Expr>, Box<Expr>),
+    /// The same value, which must be a Boolean. Built by the checker for the
+    /// condition of a dependency's `if`, never by the parser.
+    Condition(Box<Expr>),
 }
 
 /// A piece of a template.
@@ -481,6 +486,14 @@ pub enum Member {
     Dependency {
         coordinate: Expr,
         version: Option<Expr>,
+        span: Span,
+    },
+    /// Dependencies that apply only when a condition holds. `span` is the
+    /// `if` keyword, which also tells one `if` from another.
+    If {
+        condition: Expr,
+        then: Vec<Member>,
+        otherwise: Vec<Member>,
         span: Span,
     },
 }
@@ -672,7 +685,58 @@ impl Parser {
                     span: start..end,
                 })
             }
+            Some("if") => {
+                let span = self.bump().span;
+                self.expect(&Token::LParen, "after `if`")?;
+                let condition = self.expr()?;
+                self.expect(&Token::RParen, "after the condition")?;
+                let then = self.conditional_block()?;
+                let otherwise = if self.keyword() == Some("else") {
+                    self.bump();
+                    if self.keyword() == Some("if") {
+                        vec![self.member()?]
+                    } else {
+                        self.conditional_block()?
+                    }
+                } else {
+                    Vec::new()
+                };
+                Ok(Member::If {
+                    condition,
+                    then,
+                    otherwise,
+                    span,
+                })
+            }
             _ => Ok(Member::Setting(self.assignment("a setting")?)),
+        }
+    }
+
+    /// What an `if` in a module applies to: a `{ ... }` block or one member.
+    fn conditional_block(&mut self) -> Result<Vec<Member>, Diagnostic> {
+        if !self.eat(&Token::LBrace) {
+            return Ok(vec![self.conditional_member()?]);
+        }
+        let mut members = Vec::new();
+        while !matches!(self.peek(), Token::RBrace | Token::Eof) {
+            members.push(self.conditional_member()?);
+            self.end_of_statement()?;
+        }
+        self.expect(&Token::RBrace, "to end the block")?;
+        Ok(members)
+    }
+
+    fn conditional_member(&mut self) -> Result<Member, Diagnostic> {
+        match self.keyword() {
+            Some("dependency" | "if") => self.member(),
+            _ => Err(Diagnostic::new(
+                format!(
+                    "only `dependency(...)` can go inside this `if`, found {}",
+                    self.peek().describe()
+                ),
+                self.span(),
+            )
+            .help("to choose a setting's value, write `setting = if (c) a else b`")),
         }
     }
 

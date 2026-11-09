@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+use watershed_build::workspace::text_of;
 use watershed_build::{Kind, SETTINGS, Workspace};
 
 const USAGE: &str = "\
@@ -146,12 +147,13 @@ fn show(w: &Workspace) -> String {
         }
         if !m.dependencies.is_empty() {
             out += "  dependencies\n";
-            for (coordinate, node) in &m.dependencies {
-                let version = match w.value(node) {
-                    Some(watershed_core::Value::Str(s)) => s.to_string(),
-                    other => other.map_or("?".into(), ToString::to_string),
-                };
-                out += &format!("    {coordinate}:{version}\n");
+            for d in &m.dependencies {
+                if w.applies(d) {
+                    let version = text_of(w.value(&d.node));
+                    out += &format!("    {}:{version}\n", d.coordinate);
+                } else {
+                    out += &format!("    {}   (off)\n", d.coordinate);
+                }
             }
         }
         out.push('\n');
