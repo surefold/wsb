@@ -43,6 +43,7 @@
 pub mod abi;
 pub mod build;
 pub mod diagnostic;
+pub mod lsp;
 pub mod project;
 pub mod syntax;
 pub mod workspace;

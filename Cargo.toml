@@ -12,6 +12,7 @@ path = "src/bin/wsb.rs"
 
 [dependencies]
 watershed-core = { path = "../watershed-core" }
+serde_json = "1"
 
 [lints]
 workspace = true
