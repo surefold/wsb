@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+use watershed_build::build::{Jvm, Status, build};
 use watershed_build::workspace::text_of;
 use watershed_build::{Kind, SETTINGS, Workspace};
 
@@ -15,6 +16,7 @@ usage:
   wsb [options] check           report errors, and nothing else
   wsb [options] explain NAME    why a value is what it is (NAME can be part of a name)
   wsb [options] watch           show what changes each time the file is saved
+  wsb [options] build [-j N]    compile the modules, skipping what has not changed
   wsb settings                  the settings a module can have
 
 options:
@@ -68,6 +70,11 @@ fn main() -> ExitCode {
         }),
         ["explain", query] => with_workspace(&file, &env, |w, _| explain(w, query)),
         ["watch"] => watch(&file, &env),
+        ["build"] => run_build(&file, &env, default_jobs()),
+        ["build", "-j", n] => match n.parse() {
+            Ok(jobs) if jobs > 0 => run_build(&file, &env, jobs),
+            _ => fail("-j needs a number above 0"),
+        },
         ["settings"] => {
             for s in SETTINGS {
                 println!(
@@ -90,6 +97,63 @@ fn fail(message: &str) -> ExitCode {
 
 fn read(file: &str) -> Result<String, String> {
     std::fs::read_to_string(file).map_err(|e| format!("cannot read {file}: {e}"))
+}
+
+/// Half the cores: each compiler is a JVM that uses several threads itself.
+fn default_jobs() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1))
+}
+
+fn run_build(file: &str, env: &dyn Fn(&str) -> Option<String>, jobs: usize) -> ExitCode {
+    with_workspace(file, env, |w, _| {
+        let root = match std::path::Path::new(file).parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            _ => std::path::PathBuf::from("."),
+        };
+        if let Some(installed) = Jvm::kotlin_version() {
+            let wanted = w.project().modules.iter().find_map(|m| {
+                let v = text_of(w.value(&format!("{}.kotlin", m.name)));
+                (v != installed).then_some(v)
+            });
+            if let Some(wanted) = wanted {
+                eprintln!(
+                    "note: the file asks for Kotlin {wanted}, but this uses kotlinc {installed} from the PATH"
+                );
+            }
+        }
+        let report = match build(w, &root, &Jvm, jobs) {
+            Ok(report) => report,
+            Err(e) => return fail(&e),
+        };
+        let mut compiled = 0;
+        for o in &report.outcomes {
+            match &o.status {
+                Status::Compiled { api_changed } => {
+                    compiled += 1;
+                    let api = if *api_changed {
+                        "public API changed"
+                    } else {
+                        "same public API"
+                    };
+                    println!(
+                        "{}: compiled in {:.1}s, {api}",
+                        o.module,
+                        o.took.as_secs_f64()
+                    );
+                }
+                Status::UpToDate => println!("{}: up to date", o.module),
+                Status::NoSources => println!("{}: no sources", o.module),
+                Status::Failed(message) => eprintln!("{}: failed\n{message}", o.module),
+                Status::Blocked(dep) => eprintln!("{}: not built, because {dep} failed", o.module),
+            }
+        }
+        println!("{} modules, {compiled} compiled", report.outcomes.len());
+        if report.succeeded() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        }
+    })
 }
 
 fn with_workspace(
