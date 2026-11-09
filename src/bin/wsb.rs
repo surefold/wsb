@@ -1,10 +1,11 @@
 //! `wsb`: check, show, explain and watch a build file.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use watershed_build::build::{Jvm, Status, build};
+use watershed_build::build::{Jvm, Options, Status, build};
 use watershed_build::workspace::text_of;
 use watershed_build::{Kind, SETTINGS, Workspace};
 
@@ -16,7 +17,8 @@ usage:
   wsb [options] check           report errors, and nothing else
   wsb [options] explain NAME    why a value is what it is (NAME can be part of a name)
   wsb [options] watch           show what changes each time the file is saved
-  wsb [options] build [-j N]    compile the modules, skipping what has not changed
+  wsb [options] build [-j N] [--no-cache]
+                                compile the modules, skipping what has not changed
   wsb lsp                       a language server for editors, on standard input and output
   wsb settings                  the settings a module can have
 
@@ -71,10 +73,9 @@ fn main() -> ExitCode {
         }),
         ["explain", query] => with_workspace(&file, &env, |w, _| explain(w, query)),
         ["watch"] => watch(&file, &env),
-        ["build"] => run_build(&file, &env, default_jobs()),
-        ["build", "-j", n] => match n.parse() {
-            Ok(jobs) if jobs > 0 => run_build(&file, &env, jobs),
-            _ => fail("-j needs a number above 0"),
+        ["build", rest @ ..] => match build_options(rest) {
+            Ok(options) => run_build(&file, &env, &options),
+            Err(e) => fail(&e),
         },
         ["lsp"] => {
             let stdin = std::io::stdin();
@@ -112,7 +113,37 @@ fn default_jobs() -> usize {
     std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1))
 }
 
-fn run_build(file: &str, env: &dyn Fn(&str) -> Option<String>, jobs: usize) -> ExitCode {
+/// Where results are kept unless told otherwise.
+fn default_cache() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("WSB_CACHE") {
+        return Some(PathBuf::from(dir));
+    }
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache/wsb"))
+}
+
+fn build_options(words: &[&str]) -> Result<Options, String> {
+    let mut options = Options {
+        jobs: default_jobs(),
+        cache: default_cache(),
+    };
+    let mut words = words.iter();
+    while let Some(word) = words.next() {
+        match *word {
+            "--no-cache" => options.cache = None,
+            "-j" => {
+                options.jobs = words
+                    .next()
+                    .and_then(|n| n.parse().ok())
+                    .filter(|n| *n > 0)
+                    .ok_or("-j needs a number above 0")?;
+            }
+            other => return Err(format!("build does not understand `{other}`")),
+        }
+    }
+    Ok(options)
+}
+
+fn run_build(file: &str, env: &dyn Fn(&str) -> Option<String>, options: &Options) -> ExitCode {
     with_workspace(file, env, |w, _| {
         let root = match std::path::Path::new(file).parent() {
             Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
@@ -129,7 +160,7 @@ fn run_build(file: &str, env: &dyn Fn(&str) -> Option<String>, jobs: usize) -> E
                 );
             }
         }
-        let report = match build(w, &root, &Jvm, jobs) {
+        let report = match build(w, &root, &Jvm, options) {
             Ok(report) => report,
             Err(e) => return fail(&e),
         };
@@ -149,13 +180,28 @@ fn run_build(file: &str, env: &dyn Fn(&str) -> Option<String>, jobs: usize) -> E
                         o.took.as_secs_f64()
                     );
                 }
+                Status::Restored { api_changed } => {
+                    let api = if *api_changed {
+                        "public API changed"
+                    } else {
+                        "same public API"
+                    };
+                    println!("{}: restored from the cache, {api}", o.module);
+                }
                 Status::UpToDate => println!("{}: up to date", o.module),
                 Status::NoSources => println!("{}: no sources", o.module),
                 Status::Failed(message) => eprintln!("{}: failed\n{message}", o.module),
                 Status::Blocked(dep) => eprintln!("{}: not built, because {dep} failed", o.module),
             }
         }
-        println!("{} modules, {compiled} compiled", report.outcomes.len());
+        for warning in &report.warnings {
+            eprintln!("warning: {warning}");
+        }
+        println!(
+            "{} modules, {compiled} compiled, {} from the cache",
+            report.outcomes.len(),
+            report.restored().len()
+        );
         if report.succeeded() {
             ExitCode::SUCCESS
         } else {
