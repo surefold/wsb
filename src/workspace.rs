@@ -7,7 +7,7 @@ use std::sync::Arc;
 use watershed_core::{Graph, Ir, NodeId, Type, Value};
 
 use crate::diagnostic::Diagnostic;
-use crate::project::{Binding, Plan, Project};
+use crate::project::{Binding, Dependency, Plan, Project};
 
 /// Reads an environment variable. A test or a tool can pass its own.
 pub type Env<'a> = &'a dyn Fn(&str) -> Option<String>;
@@ -198,6 +198,7 @@ impl Workspace {
             Plan::Double(bits) => Ir::Const(Value::F64(f64::from_bits(*bits))),
             Plan::Bool(b) => Ir::Const(Value::Bool(*b)),
             Plan::Str(s) => Ir::Const(Value::Str(s.as_str().into())),
+            Plan::List(items) => Ir::List(items.iter().map(|i| Arc::new(self.ir(i))).collect()),
             Plan::Node(n) => self.graph.reference(self.nodes[n]),
             Plan::Unary(op, a) => Ir::Unary(*op, Arc::new(self.ir(a))),
             Plan::Binary(op, a, b) => Ir::Binary(*op, Arc::new(self.ir(a)), Arc::new(self.ir(b))),
@@ -245,6 +246,27 @@ impl Workspace {
         live.then(|| self.graph.value(self.nodes[name]))
     }
 
+    /// The dependencies of a module that apply right now, as `(coordinate,
+    /// version)`, in file order.
+    pub fn active_dependencies(&self, module: &str) -> Vec<(String, String)> {
+        let Some(info) = self.project.module(module) else {
+            return Vec::new();
+        };
+        info.dependencies
+            .iter()
+            .filter(|d| self.applies(d))
+            .map(|d| (d.coordinate.clone(), text_of(self.value(&d.node))))
+            .collect()
+    }
+
+    /// Whether a dependency applies right now.
+    pub fn applies(&self, dependency: &Dependency) -> bool {
+        match &dependency.enabled {
+            None => true,
+            Some(node) => matches!(self.value(node), Some(Value::Bool(true))),
+        }
+    }
+
     pub fn binding(&self, name: &str) -> Option<&Binding> {
         self.project.bindings.iter().find(|b| b.name == name)
     }
@@ -272,6 +294,14 @@ impl Workspace {
     }
 }
 
+/// A value as plain text: a string without its quotes.
+pub fn text_of(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::Str(s)) => s.to_string(),
+        other => other.map_or("?".into(), ToString::to_string),
+    }
+}
+
 /// A constant of the type, for a value removed from the file.
 fn blank(ty: Type) -> Plan {
     match ty {
@@ -279,5 +309,6 @@ fn blank(ty: Type) -> Plan {
         Type::F64 => Plan::Double(0f64.to_bits()),
         Type::Bool => Plan::Bool(false),
         Type::Str => Plan::Str(String::new()),
+        Type::StrList => Plan::List(Vec::new()),
     }
 }

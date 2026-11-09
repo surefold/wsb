@@ -103,16 +103,20 @@ error: there is no setting `jvmTaget`
 | `dependency("g:a:1.0")` | a Maven dependency |
 | `dependency("g:a", expr)` | a Maven dependency whose version is worked out |
 | `dependency("g:a:$version")` | the same, with the version in a template |
+| `if (c) { dependency(...) } else { ... }` | dependencies that apply only when a condition holds |
 | `env("NAME")` | an environment variable, as a String (`""` when unset) |
 | `if (c) a else b` | a condition; the `else` is required |
 | `+ - * /`, `== != < <= > >=`, `&& \|\| !` | as in Kotlin |
 | `"a" + "b"` | two Strings joined |
 | `"v$major.${minor + 1}"` | a template: values of any type, shown as text |
+| `listOf("a", "b")` | a list of Strings |
+| `list + other`, `list + "item"` | two lists one after the other, or one item added |
+| `join(list, " ")` | a list's items as one String |
 | `min(a, b)`, `max(a, b)`, `abs(a)` | on Ints or Doubles |
 | `core.jvmTarget`, `core.x` | another module's setting or value |
 | `// ...`, `/* ... */` | comments |
 
-The types are `Int`, `Double`, `Boolean` and `String`. Int and Double are not
+The types are `Int`, `Double`, `Boolean`, `String` and `List` (of Strings). Int and Double are not
 mixed silently (`1 + 2.5` is an error: write `1.0`). A line ends a statement,
 as in Kotlin. A value cannot depend on itself, and modules cannot depend on
 each other in a loop; both are reported with the loop spelt out.
@@ -123,6 +127,13 @@ A `$` that starts neither is an ordinary character, and `\$` is always one. A
 string, and everything in it, stays on one line. Text cannot grow past 1 MiB:
 a join that would is an error value, as an integer overflow is. Very large and
 very small Doubles are shown in a form that can differ from Kotlin's.
+
+A conditional dependency is still known about when its condition is false, and
+`wsb show` marks it `(off)`. The same dependency can appear in the two branches
+of one `if`, to choose its version. Anywhere else, twice is an error, because
+both could apply. Only `dependency(...)` can go inside such an `if`: to choose a
+setting's value, write `setting = if (c) a else b`. A list holds at most 65,536
+items; a join past that is an error value.
 
 Each module has every setting, so `core.kotlin` always means something. One a
 module does not set comes from `defaults.kotlin`, which is the built-in
@@ -158,8 +169,6 @@ for IntelliJ IDEA and VS Code. Its README says how to install it.
 - **A language server.** It would reuse this parser to give errors as you
   type, completion of settings and names, go to definition, and hovering over
   any value to see it and its `explain` tree, in IntelliJ and VS Code.
-- **Lists and conditional dependencies** (`dependency(...)` only on some
-  platforms).
 - **Tasks:** nodes that run Rust code, such as resolving dependencies and
   running the compiler, cached by the hash of what they read. A module whose
   public API comes out unchanged then stops the rebuild going further, the

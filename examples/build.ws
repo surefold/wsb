@@ -13,6 +13,7 @@ defaults {
     kotlin = "2.1.0"
     group = base
     warningsAsErrors = ci
+    freeCompilerArgs = listOf("-progressive")
 }
 
 module core {
@@ -23,7 +24,11 @@ module core {
 module api {
     dependsOn(core)
     jvmTarget = core.jvmTarget
+    freeCompilerArgs = core.freeCompilerArgs + "-Xjsr305=strict"
     dependency("io.ktor:ktor-server-core:3.0.3")
+    if (ci) {
+        dependency("io.ktor:ktor-server-test-host:3.0.3")
+    }
 }
 
 module app {

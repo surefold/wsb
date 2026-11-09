@@ -11,6 +11,7 @@
 //! | `module app { jvmTarget = ... }`     | `app.jvmTarget`                       |
 //! | `module app { val x = ... }`         | `app.x`                               |
 //! | `dependency("g:a", ...)` in `app`    | `app.dependencies[g:a]`               |
+//! | `if (c) dependency("g:a", ...)`       | also `app.dependencies[g:a].enabled` |
 //! | `env("CI")`                          | `env.CI` (an input)                   |
 //!
 //! Every module has every setting. One it does not set takes the value from
@@ -72,6 +73,12 @@ pub const SETTINGS: &[Setting] = &[
         default: Literal::Bool(false),
         about: "whether a compiler warning fails the build",
     },
+    Setting {
+        name: "freeCompilerArgs",
+        ty: Type::StrList,
+        default: Literal::EmptyList,
+        about: "extra arguments for the Kotlin compiler",
+    },
 ];
 
 #[derive(Debug, Clone, Copy)]
@@ -79,6 +86,7 @@ pub enum Literal {
     Int(i64),
     Bool(bool),
     Str(&'static str),
+    EmptyList,
 }
 
 fn setting(name: &str) -> Option<&'static Setting> {
@@ -92,6 +100,7 @@ pub fn type_name(ty: Type) -> &'static str {
         Type::F64 => "Double",
         Type::Bool => "Boolean",
         Type::Str => "String",
+        Type::StrList => "List",
     }
 }
 
@@ -105,6 +114,7 @@ pub enum Plan {
     Double(u64),
     Bool(bool),
     Str(String),
+    List(Vec<Plan>),
     Node(String),
     Unary(UnOp, Box<Plan>),
     Binary(BinOp, Box<Plan>, Box<Plan>),
@@ -117,6 +127,7 @@ impl Plan {
             Literal::Int(n) => Plan::Int(n),
             Literal::Bool(b) => Plan::Bool(b),
             Literal::Str(s) => Plan::Str(s.to_string()),
+            Literal::EmptyList => Plan::List(Vec::new()),
         }
     }
 
@@ -124,6 +135,11 @@ impl Plan {
     pub fn nodes<'a>(&'a self, out: &mut Vec<&'a str>) {
         match self {
             Plan::Node(n) => out.push(n),
+            Plan::List(items) => {
+                for item in items {
+                    item.nodes(out);
+                }
+            }
             Plan::Unary(_, a) => a.nodes(out),
             Plan::Binary(_, a, b) => {
                 a.nodes(out);
@@ -144,7 +160,11 @@ pub enum Kind {
     Val,
     Default,
     Setting,
-    Dependency { coordinate: String },
+    Dependency {
+        coordinate: String,
+    },
+    /// Whether a conditional dependency applies.
+    DependencyEnabled,
 }
 
 /// One value in the project: a node of the graph.
@@ -158,14 +178,25 @@ pub struct Binding {
     pub span: Span,
 }
 
+/// A dependency of a module.
+#[derive(Debug, Clone)]
+pub struct Dependency {
+    /// `group:artifact`.
+    pub coordinate: String,
+    /// The node holding its version.
+    pub node: String,
+    /// The node saying whether it applies, if that depends on a condition.
+    pub enabled: Option<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ModuleInfo {
     pub name: String,
     pub depends_on: Vec<String>,
     /// Nodes of the module's own values, in file order.
     pub vals: Vec<String>,
-    /// `(coordinate, node)` for each dependency, in file order.
-    pub dependencies: Vec<(String, String)>,
+    /// Each dependency, in file order.
+    pub dependencies: Vec<Dependency>,
     pub span: Span,
 }
 
@@ -419,69 +450,101 @@ impl Checker {
                             }
                         }
                     }
-                    Member::Dependency {
-                        coordinate,
-                        version,
+                    // Handled together below, once all of them are known.
+                    Member::Dependency { .. } | Member::If { .. } => {}
+                }
+            }
+            let mut declared = Vec::new();
+            collect_dependencies(&m.members, None, &[], &mut declared);
+            let mut groups: Vec<(String, Vec<(DependencyDecl, Expr)>)> = Vec::new();
+            for decl in declared {
+                let (key, version) = dependency_parts(decl.coordinate, decl.version)?;
+                match groups.iter_mut().find(|(k, _)| *k == key) {
+                    Some((_, group)) => {
+                        if group.iter().any(|(other, _)| !exclusive(other, &decl)) {
+                            return Err(Diagnostic::new(
+                                format!("dependency `{key}` is defined twice"),
+                                decl.span.clone(),
+                            )
+                            .help(
+                                "to choose between them, put them in the two branches of an `if`",
+                            ));
+                        }
+                        group.push((decl, version));
+                    }
+                    None => groups.push((key, vec![(decl, version)])),
+                }
+            }
+            for (key, group) in groups {
+                let name = format!("{module}.dependencies[{key}]");
+                let span = group[0].0.span.clone();
+                let scope = Scope::Module(module.clone());
+                let conditions: Vec<Expr> = group
+                    .iter()
+                    .filter_map(|(decl, _)| decl.condition.clone())
+                    .collect();
+                // At most one of a group applies, so the first condition that
+                // holds picks its version. With none, the value is unused.
+                let version = if conditions.is_empty() {
+                    group[0].1.clone()
+                } else {
+                    let none = Expr {
+                        kind: ExprKind::Str(String::new()),
+                        span: span.clone(),
+                    };
+                    group
+                        .iter()
+                        .rev()
+                        .fold(none, |otherwise, (decl, version)| Expr {
+                            kind: ExprKind::If(
+                                Box::new(decl.condition.clone().expect("a conditional group")),
+                                Box::new(version.clone()),
+                                Box::new(otherwise),
+                            ),
+                            span: span.clone(),
+                        })
+                };
+                let enabled = conditions.into_iter().reduce(|a, b| {
+                    let span = a.span.start..b.span.end;
+                    Expr {
+                        kind: ExprKind::Binary(BinaryOp::Or, Box::new(a), Box::new(b)),
                         span,
-                    } => {
-                        let (text, templated) = coordinate_text(coordinate)?;
-                        if let (Some(_), Some(expr)) = (&templated, version) {
-                            return Err(Diagnostic::new(
-                                "this dependency has two versions",
-                                expr.span.clone(),
-                            )
-                            .help("drop the version from the coordinate, or this one"));
-                        }
-                        let version = templated.as_ref().or(version.as_ref());
-                        let parts: Vec<&str> = text.split(':').collect();
-                        if parts.iter().any(|p| p.trim().is_empty())
-                            || !(2..=3).contains(&parts.len())
-                        {
-                            return Err(Diagnostic::new(
-                                format!("`{text}` is not a Maven coordinate"),
-                                coordinate.span.clone(),
-                            )
-                            .help("write `\"group:artifact:version\"`, or `\"group:artifact\"` and the version second"));
-                        }
-                        let key = format!("{}:{}", parts[0], parts[1]);
-                        let source = match (parts.get(2), version) {
-                            (Some(v), None) => Source::Fixed(Plan::Str((*v).to_string())),
-                            (None, Some(expr)) => {
-                                Source::Expr(expr.clone(), Scope::Module(module.clone()))
-                            }
-                            (Some(_), Some(expr)) => {
-                                return Err(Diagnostic::new(
-                                    "this dependency has two versions",
-                                    expr.span.clone(),
-                                )
-                                .help("drop the version from the coordinate, or this one"));
-                            }
-                            (None, None) => {
-                                return Err(Diagnostic::new(
-                                    format!("`{text}` has no version"),
-                                    coordinate.span.clone(),
-                                )
-                                .help(format!(
-                                    "write `\"{key}:1.0\"`, or give the version second"
-                                )));
-                            }
-                        };
-                        let name = format!("{module}.dependencies[{key}]");
+                    }
+                });
+                let enabled = match enabled {
+                    None => None,
+                    Some(expr) => {
+                        let node = format!("{name}.enabled");
                         self.declare(
-                            name.clone(),
+                            node.clone(),
                             Raw {
-                                source,
-                                declared: Some(Type::Str),
-                                kind: Kind::Dependency {
-                                    coordinate: key.clone(),
-                                },
+                                source: Source::Expr(expr, scope.clone()),
+                                declared: Some(Type::Bool),
+                                kind: Kind::DependencyEnabled,
                                 span: span.clone(),
                             },
-                            &format!("dependency `{key}`"),
+                            &format!("the condition of dependency `{key}`"),
                         )?;
-                        info.dependencies.push((key, name));
+                        Some(node)
                     }
-                }
+                };
+                self.declare(
+                    name.clone(),
+                    Raw {
+                        source: Source::Expr(version, scope),
+                        declared: Some(Type::Str),
+                        kind: Kind::Dependency {
+                            coordinate: key.clone(),
+                        },
+                        span,
+                    },
+                    &format!("dependency `{key}`"),
+                )?;
+                info.dependencies.push(Dependency {
+                    coordinate: key,
+                    node: name,
+                    enabled,
+                });
             }
             // Every setting, from the module or else from the defaults.
             for s in SETTINGS {
@@ -620,6 +683,16 @@ impl Checker {
                 let plan = joined.expect("a template has at least one part");
                 Ok((plan, Type::Str))
             }
+            ExprKind::Condition(c) => {
+                let (plan, ty) = self.expr(c, scope)?;
+                if ty != Type::Bool {
+                    return Err(Diagnostic::new(
+                        format!("a condition must be a Boolean, but this is {}", a_type(ty)),
+                        c.span.clone(),
+                    ));
+                }
+                Ok((plan, Type::Bool))
+            }
             ExprKind::Name(module, name) => {
                 let node = self.lookup(module.as_ref(), name, scope)?;
                 let ty = self.resolve(&node, Some(&e.span))?;
@@ -644,6 +717,12 @@ impl Checker {
             ExprKind::Binary(op, a, b) => {
                 let (pa, ta) = self.expr(a, scope)?;
                 let (pb, tb) = self.expr(b, scope)?;
+                // As in Kotlin, `list + "item"` adds one item.
+                if op == &BinaryOp::Add && ta == Type::StrList && tb == Type::Str {
+                    let item = Plan::List(vec![pb]);
+                    let plan = Plan::Binary(BinOp::Concat, Box::new(pa), Box::new(item));
+                    return Ok((plan, Type::StrList));
+                }
                 if ta != tb {
                     let mut d = Diagnostic::new(
                         format!(
@@ -664,7 +743,9 @@ impl Checker {
                     return Err(d);
                 }
                 let (bin, ok, result) = match op {
-                    BinaryOp::Add if ta == Type::Str => (BinOp::Concat, true, ta),
+                    BinaryOp::Add if matches!(ta, Type::Str | Type::StrList) => {
+                        (BinOp::Concat, true, ta)
+                    }
                     BinaryOp::Add => (BinOp::Add, ta.is_numeric(), ta),
                     BinaryOp::Sub => (BinOp::Sub, ta.is_numeric(), ta),
                     BinaryOp::Mul => (BinOp::Mul, ta.is_numeric(), ta),
@@ -778,6 +859,43 @@ impl Checker {
                 }
                 Ok((Plan::Unary(UnOp::Abs, Box::new(pa)), ta))
             }
+            "listOf" => {
+                let mut items = Vec::with_capacity(args.len());
+                for arg in args {
+                    let (plan, ty) = self.expr(arg, scope)?;
+                    if ty != Type::Str {
+                        return Err(Diagnostic::new(
+                            format!(
+                                "every item of a list must be a String, but this is {}",
+                                a_type(ty)
+                            ),
+                            arg.span.clone(),
+                        )
+                        .help("to show a value as text, use a template: `\"$value\"`"));
+                    }
+                    items.push(plan);
+                }
+                Ok((Plan::List(items), Type::StrList))
+            }
+            "join" => {
+                arity(2)?;
+                let (pa, ta) = self.expr(&args[0], scope)?;
+                let (pb, tb) = self.expr(&args[1], scope)?;
+                if ta != Type::StrList || tb != Type::Str {
+                    return Err(Diagnostic::new(
+                        format!(
+                            "`join` needs a List and a String, but got {} and {}",
+                            a_type(ta),
+                            a_type(tb)
+                        ),
+                        e.span.clone(),
+                    ));
+                }
+                Ok((
+                    Plan::Binary(BinOp::Join, Box::new(pa), Box::new(pb)),
+                    Type::Str,
+                ))
+            }
             "dependsOn" | "dependency" => Err(Diagnostic::new(
                 format!("`{}` can only be used directly inside a module", f.name),
                 f.span.clone(),
@@ -785,10 +903,11 @@ impl Checker {
             other => {
                 let mut d =
                     Diagnostic::new(format!("there is no function `{other}`"), f.span.clone());
-                if let Some(m) = did_you_mean(other, ["env", "min", "max", "abs"]) {
+                let functions = ["env", "min", "max", "abs", "listOf", "join"];
+                if let Some(m) = did_you_mean(other, functions) {
                     d = d.help(format!("did you mean `{m}`?"));
                 } else {
-                    d = d.help("the functions are `env`, `min`, `max` and `abs`");
+                    d = d.help("the functions are `env`, `min`, `max`, `abs`, `listOf` and `join`");
                 }
                 Err(d)
             }
@@ -1001,4 +1120,127 @@ fn coordinate_text(coordinate: &Expr) -> Result<(String, Option<Expr>), Diagnost
         span: coordinate.span.clone(),
     };
     Ok((format!("{group}:{artifact}"), Some(expr)))
+}
+
+/// One `dependency(...)` in a module, and the `if`s around it.
+struct DependencyDecl<'a> {
+    coordinate: &'a Expr,
+    version: Option<&'a Expr>,
+    span: &'a Span,
+    /// When it applies, if not always.
+    condition: Option<Expr>,
+    /// Each enclosing `if`, by the position of its keyword, and whether this
+    /// is in its `then` branch.
+    branches: Vec<(usize, bool)>,
+}
+
+/// Finds every dependency in `members`, however deep in `if`s.
+fn collect_dependencies<'a>(
+    members: &'a [Member],
+    condition: Option<&Expr>,
+    branches: &[(usize, bool)],
+    out: &mut Vec<DependencyDecl<'a>>,
+) {
+    for member in members {
+        match member {
+            Member::Dependency {
+                coordinate,
+                version,
+                span,
+            } => out.push(DependencyDecl {
+                coordinate,
+                version: version.as_ref(),
+                span,
+                condition: condition.cloned(),
+                branches: branches.to_vec(),
+            }),
+            Member::If {
+                condition: test,
+                then,
+                otherwise,
+                span,
+            } => {
+                let test = Expr {
+                    kind: ExprKind::Condition(Box::new(test.clone())),
+                    span: test.span.clone(),
+                };
+                let negated = Expr {
+                    span: test.span.clone(),
+                    kind: ExprKind::Unary(UnaryOp::Not, Box::new(test.clone())),
+                };
+                for (branch, taken, test) in [(then, true, test), (otherwise, false, negated)] {
+                    let inner = match condition {
+                        None => test,
+                        Some(outer) => Expr {
+                            span: outer.span.start..test.span.end,
+                            kind: ExprKind::Binary(
+                                BinaryOp::And,
+                                Box::new(outer.clone()),
+                                Box::new(test),
+                            ),
+                        },
+                    };
+                    let mut path = branches.to_vec();
+                    path.push((span.start, taken));
+                    collect_dependencies(branch, Some(&inner), &path, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Whether two dependencies can never both apply: they are in different
+/// branches of the same `if`.
+fn exclusive(a: &DependencyDecl, b: &DependencyDecl) -> bool {
+    a.branches
+        .iter()
+        .any(|(id, taken)| b.branches.iter().any(|(i, t)| i == id && t != taken))
+}
+
+/// A dependency's `group:artifact`, and its version as an expression.
+fn dependency_parts(
+    coordinate: &Expr,
+    version: Option<&Expr>,
+) -> Result<(String, Expr), Diagnostic> {
+    let (text, templated) = coordinate_text(coordinate)?;
+    if let (Some(_), Some(expr)) = (&templated, version) {
+        return Err(
+            Diagnostic::new("this dependency has two versions", expr.span.clone())
+                .help("drop the version from the coordinate, or this one"),
+        );
+    }
+    let version = templated.as_ref().or(version);
+    let parts: Vec<&str> = text.split(':').collect();
+    if parts.iter().any(|p| p.trim().is_empty()) || !(2..=3).contains(&parts.len()) {
+        return Err(Diagnostic::new(
+            format!("`{text}` is not a Maven coordinate"),
+            coordinate.span.clone(),
+        )
+        .help(
+            "write `\"group:artifact:version\"`, or `\"group:artifact\"` and the version second",
+        ));
+    }
+    let key = format!("{}:{}", parts[0], parts[1]);
+    let expr = match (parts.get(2), version) {
+        (Some(v), None) => Expr {
+            kind: ExprKind::Str((*v).to_string()),
+            span: coordinate.span.clone(),
+        },
+        (None, Some(expr)) => expr.clone(),
+        (Some(_), Some(expr)) => {
+            return Err(
+                Diagnostic::new("this dependency has two versions", expr.span.clone())
+                    .help("drop the version from the coordinate, or this one"),
+            );
+        }
+        (None, None) => {
+            return Err(Diagnostic::new(
+                format!("`{text}` has no version"),
+                coordinate.span.clone(),
+            )
+            .help(format!("write `\"{key}:1.0\"`, or give the version second")));
+        }
+    };
+    Ok((key, expr))
 }
