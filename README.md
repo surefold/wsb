@@ -6,8 +6,8 @@ node in a watershed graph. Edit the file and only the values whose formula
 changed, or that use one that did, are worked out again. Any value can say
 where it came from.
 
-This is the first stage of a build tool: the build file. Nothing is compiled
-yet (see [What comes next](#what-comes-next)).
+`wsb build` compiles the modules with `kotlinc`, and skips the ones that do not
+need it (see [Building](#building)).
 
 ```kotlin
 val ci = env("CI") == "true"
@@ -139,6 +139,36 @@ Each module has every setting, so `core.kotlin` always means something. One a
 module does not set comes from `defaults.kotlin`, which is the built-in
 default unless the file sets it.
 
+## Building
+
+`wsb build` needs `kotlinc` and `coursier` on the `PATH`. A module's sources are
+the `.kt` files under `<module>/src`, next to the build file. Classes go to
+`.wsb/out/<module>/classes`.
+
+```text
+$ wsb build                         # after changing a function body in lib
+lib: compiled in 4.0s, same public API
+app: up to date
+2 modules, 1 compiled
+```
+
+A module is compiled again only if its sources, its settings, its libraries, or
+the public API of a module it can see changed. Modules that do not depend on
+each other compile at the same time, by default on half the cores; `-j N` sets
+how many.
+
+The public API is read from the compiled classes: public and protected
+members, and the Kotlin metadata that says, for example, whether a type can be
+null. Anything unclear counts as a change, because a needless compile only
+costs time. So adding a private member recompiles the modules above it, and a
+module whose sources mention `inline` has all its code counted.
+
+`.wsb/state` remembers the last build, so this is a cache of one result per
+module, on this machine. Changing a file and changing it back compiles twice.
+
+For now `wsb build` uses whichever `kotlinc` is installed, and says so if the
+`kotlin` setting asks for a different version.
+
 ## How it works
 
 `Project::parse` checks the file: every name is resolved, every type checked,
@@ -169,9 +199,9 @@ for IntelliJ IDEA and VS Code. Its README says how to install it.
 - **A language server.** It would reuse this parser to give errors as you
   type, completion of settings and names, go to definition, and hovering over
   any value to see it and its `explain` tree, in IntelliJ and VS Code.
-- **Tasks:** nodes that run Rust code, such as resolving dependencies and
-  running the compiler, cached by the hash of what they read. A module whose
-  public API comes out unchanged then stops the rebuild going further, the
-  same cutoff as for values.
+- **A shared build cache:** results stored by the hash of what went into them,
+  so going back to an earlier state, or another machine's build, costs nothing.
+- **The Kotlin version a module asks for**, fetched rather than taken from the
+  `PATH`.
 - **Resolving versions** across modules (with Coursier at first), with
   `explain` showing why each dependency ended up at its version.

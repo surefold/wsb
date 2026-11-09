@@ -40,6 +40,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod abi;
+pub mod build;
 pub mod diagnostic;
 pub mod project;
 pub mod syntax;
