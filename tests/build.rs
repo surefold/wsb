@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use watershed_build::Workspace;
 use watershed_build::abi;
-use watershed_build::build::{CompileRequest, Report, Status, Tools, build};
+use watershed_build::build::{CompileRequest, Options, Report, Status, Tools, build};
 
 fn no_env(_: &str) -> Option<String> {
     None
@@ -50,6 +50,7 @@ struct Fake {
     running: AtomicUsize,
     peak: AtomicUsize,
     delay: Mutex<Duration>,
+    compiler: Mutex<String>,
 }
 
 impl Tools for Fake {
@@ -88,7 +89,12 @@ impl Tools for Fake {
                 }
             }
         }
+        fs::write(r.out.join("Marker"), &api).unwrap();
         Ok(abi::hash(api.as_bytes()))
+    }
+
+    fn compiler(&self) -> String {
+        self.compiler.lock().unwrap().clone()
     }
 }
 
@@ -96,6 +102,7 @@ struct Project {
     dir: Dir,
     tools: Fake,
     file: String,
+    cache: Option<PathBuf>,
 }
 
 const CHAIN: &str = "module a {}\nmodule b { dependsOn(a) }\nmodule c { dependsOn(b) }\n";
@@ -109,6 +116,7 @@ impl Project {
             dir,
             tools,
             file: file.to_string(),
+            cache: None,
         }
     }
 
@@ -128,7 +136,11 @@ impl Project {
     fn build_with(&self, jobs: usize) -> Report {
         let w = Workspace::new(&self.file, &no_env).unwrap();
         self.tools.compiled.lock().unwrap().clear();
-        build(&w, &self.dir.0, &self.tools, jobs).unwrap()
+        let options = Options {
+            jobs,
+            cache: self.cache.clone(),
+        };
+        build(&w, &self.dir.0, &self.tools, &options).unwrap()
     }
 }
 
@@ -371,4 +383,131 @@ fn a_module_never_compiles_alongside_one_it_depends_on() {
     *p.tools.delay.lock().unwrap() = Duration::from_millis(30);
     p.build_with(4);
     assert_eq!(p.tools.peak.load(Ordering::SeqCst), 1);
+}
+
+// ---------------------------------------------------------------- the cache
+
+fn cached(shared: &Dir) -> Project {
+    let mut p = Project::chain();
+    p.cache = Some(shared.0.clone());
+    p
+}
+
+#[test]
+fn going_back_to_earlier_sources_restores_instead_of_compiling() {
+    let shared = Dir::new();
+    let p = cached(&shared);
+    p.build();
+    p.dir.write("a/src/Main.kt", "api one\nbody two\n");
+    assert_eq!(p.build().compiled(), ["a"]);
+    p.dir.write("a/src/Main.kt", "api one\nbody one\n");
+    let report = p.build();
+    assert!(report.compiled().is_empty());
+    assert_eq!(report.restored(), ["a"]);
+    assert_eq!(
+        report.status("a"),
+        Some(&Status::Restored { api_changed: false })
+    );
+    assert_eq!(report.status("b"), Some(&Status::UpToDate));
+}
+
+#[test]
+fn restored_classes_are_really_put_back() {
+    let shared = Dir::new();
+    let p = cached(&shared);
+    p.build();
+    p.dir.write("a/src/Main.kt", "api two\n");
+    p.build();
+    p.dir.write("a/src/Main.kt", "api one\nbody one\n");
+    p.build();
+    let marker = fs::read_to_string(root(&p).join(".wsb/out/a/classes/Marker")).unwrap();
+    assert_eq!(marker, "api one");
+}
+
+#[test]
+fn going_back_to_an_earlier_api_restores_the_modules_above_too() {
+    let shared = Dir::new();
+    let p = cached(&shared);
+    p.build();
+    p.dir.write("a/src/Main.kt", "api two\n");
+    assert_eq!(p.build().compiled(), ["a", "b", "c"]);
+    p.dir.write("a/src/Main.kt", "api one\nbody one\n");
+    let report = p.build();
+    assert!(report.compiled().is_empty());
+    assert_eq!(report.restored(), ["a", "b", "c"]);
+    assert_eq!(
+        report.status("a"),
+        Some(&Status::Restored { api_changed: true })
+    );
+}
+
+#[test]
+fn a_second_checkout_reuses_the_firsts_work() {
+    let shared = Dir::new();
+    let first = cached(&shared);
+    first.build();
+    let second = cached(&shared);
+    let report = second.build();
+    assert!(report.compiled().is_empty());
+    assert_eq!(report.restored(), ["a", "b", "c"]);
+    assert!(root(&second).join(".wsb/out/c/classes/Marker").exists());
+}
+
+#[test]
+fn a_different_compiler_does_not_reuse_results() {
+    let shared = Dir::new();
+    let first = cached(&shared);
+    first.build();
+    let second = cached(&shared);
+    *second.tools.compiler.lock().unwrap() = "newer".to_string();
+    assert_eq!(second.build().compiled(), ["a", "b", "c"]);
+}
+
+#[test]
+fn a_different_setting_does_not_reuse_results() {
+    let shared = Dir::new();
+    let first = cached(&shared);
+    first.build();
+    let mut second = cached(&shared);
+    second.file = second
+        .file
+        .replace("module a {}", "module a { jvmTarget = 21 }");
+    let report = second.build();
+    assert_eq!(report.compiled(), ["a"]);
+    assert_eq!(report.restored(), ["b", "c"]);
+}
+
+#[test]
+fn an_incomplete_cache_entry_is_ignored() {
+    let shared = Dir::new();
+    let first = cached(&shared);
+    first.build();
+    for file in abi::files_under(&shared.0).unwrap() {
+        if file.file_name().is_some_and(|n| n == "api") {
+            fs::remove_file(file).unwrap();
+        }
+    }
+    let second = cached(&shared);
+    assert_eq!(second.build().compiled(), ["a", "b", "c"]);
+}
+
+#[test]
+fn a_failed_compile_is_not_cached() {
+    let shared = Dir::new();
+    let first = cached(&shared);
+    first.tools.failing.lock().unwrap().insert("a".to_string());
+    assert!(!first.build().succeeded());
+    assert!(abi::files_under(&shared.0).unwrap().is_empty());
+}
+
+#[test]
+fn a_cache_that_cannot_be_written_warns_and_the_build_still_succeeds() {
+    let shared = Dir::new();
+    let blocker = shared.0.join("not-a-folder");
+    fs::write(&blocker, "").unwrap();
+    let mut p = Project::chain();
+    p.cache = Some(blocker);
+    let report = p.build();
+    assert!(report.succeeded());
+    assert_eq!(report.warnings.len(), 3, "{:?}", report.warnings);
 }

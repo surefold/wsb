@@ -11,6 +11,12 @@
 //! Compiling sets the module's public API as an input of the graph, so the
 //! modules above only see a change if the API really changed. That is the
 //! engine's cutoff, applied to a compiler.
+//!
+//! A cache folder can also keep every result, under the hash of what it was
+//! built from. That hash uses no paths, so going back to earlier sources, or
+//! building the same sources in another checkout, copies the classes instead
+//! of compiling them. Only share a cache with people you trust: a result is
+//! used as it is, and the hash is not cryptographic.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -47,6 +53,18 @@ pub trait Tools: Sync {
 
     /// Compiles a module, and returns the hash of its public API.
     fn compile(&self, request: &CompileRequest) -> Result<String, String>;
+
+    /// Names the compiler. Its output must not be reused across versions.
+    fn compiler(&self) -> String;
+}
+
+/// How to run a build.
+#[derive(Debug, Clone)]
+pub struct Options {
+    /// At most this many compilers at once.
+    pub jobs: usize,
+    /// Where to keep every result, if anywhere.
+    pub cache: Option<PathBuf>,
 }
 
 /// The real tools: Coursier and `kotlinc`, found on the `PATH`.
@@ -131,6 +149,13 @@ impl Tools for Jvm {
         }
         abi::of_dir(&r.out, inline)
     }
+
+    fn compiler(&self) -> String {
+        static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        VERSION
+            .get_or_init(|| Jvm::kotlin_version().unwrap_or_default())
+            .clone()
+    }
 }
 
 /// What a build did with one module.
@@ -138,6 +163,10 @@ impl Tools for Jvm {
 pub enum Status {
     /// Compiled, and whether its public API came out different.
     Compiled {
+        api_changed: bool,
+    },
+    /// Copied from the cache, and whether its public API came out different.
+    Restored {
         api_changed: bool,
     },
     UpToDate,
@@ -159,6 +188,8 @@ pub struct Outcome {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Report {
     pub outcomes: Vec<Outcome>,
+    /// Things that went wrong without failing the build.
+    pub warnings: Vec<String>,
 }
 
 impl Report {
@@ -174,6 +205,15 @@ impl Report {
             .iter()
             .find(|o| o.module == module)
             .map(|o| &o.status)
+    }
+
+    /// The modules copied from the cache, in order.
+    pub fn restored(&self) -> Vec<&str> {
+        self.outcomes
+            .iter()
+            .filter(|o| matches!(o.status, Status::Restored { .. }))
+            .map(|o| o.module.as_str())
+            .collect()
     }
 
     /// The modules compiled, in order.
@@ -308,6 +348,66 @@ fn sources_of(dir: &Path) -> Result<(Vec<PathBuf>, String), String> {
     Ok((sources, h.finish()))
 }
 
+fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
+    let describe = |e: std::io::Error| format!("{}: {e}", to.display());
+    fs::create_dir_all(to).map_err(describe)?;
+    for file in abi::files_under(from)? {
+        let target = to.join(file.strip_prefix(from).unwrap_or(&file));
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(describe)?;
+        }
+        fs::copy(&file, &target).map_err(describe)?;
+    }
+    Ok(())
+}
+
+/// Where the result of building from `key` is kept.
+fn cache_entry(cache: &Path, key: &str) -> PathBuf {
+    cache.join(&key[..2]).join(key)
+}
+
+/// Copies a cached result to `out`, and returns its public API. `None` if
+/// there is no complete result, and then the module is simply compiled.
+fn restore(entry: &Path, out: &Path) -> Option<String> {
+    let api = fs::read_to_string(entry.join("api")).ok()?;
+    let classes = entry.join("classes");
+    if !classes.is_dir() {
+        return None;
+    }
+    let copying = out.with_extension("restoring");
+    if copying.exists() {
+        fs::remove_dir_all(&copying).ok()?;
+    }
+    let copied = copy_dir(&classes, &copying).is_ok()
+        && (!out.exists() || fs::remove_dir_all(out).is_ok())
+        && fs::rename(&copying, out).is_ok();
+    if !copied {
+        let _ = fs::remove_dir_all(&copying);
+        return None;
+    }
+    Some(api)
+}
+
+/// Keeps a result. It appears all at once, so an entry is never half written.
+fn store(entry: &Path, out: &Path, api: &str, module: &str) -> Result<(), String> {
+    if entry.exists() {
+        return Ok(());
+    }
+    let writing = entry.with_extension(format!("{}-{module}", std::process::id()));
+    if writing.exists() {
+        fs::remove_dir_all(&writing).map_err(|e| e.to_string())?;
+    }
+    let done = copy_dir(out, &writing.join("classes"))
+        .and_then(|()| fs::write(writing.join("api"), api).map_err(|e| e.to_string()));
+    // Losing a race with another build is fine: its result is the same.
+    if done.is_err() || (fs::rename(&writing, entry).is_err() && !entry.exists()) {
+        let _ = fs::remove_dir_all(&writing);
+        return done.and(Err("could not move it into place".to_string()));
+    }
+    let _ = fs::remove_dir_all(&writing);
+    Ok(())
+}
+
 /// One module's part of the build.
 struct Plan {
     sources: Vec<PathBuf>,
@@ -329,7 +429,12 @@ fn text(s: &str) -> Value {
 /// Builds every module of the file, running at most `jobs` compilers at once.
 /// `root` is the folder holding the build file. An `Err` means the build
 /// could not run at all; a module that fails is reported in the [`Report`].
-pub fn build(w: &Workspace, root: &Path, tools: &dyn Tools, jobs: usize) -> Result<Report, String> {
+pub fn build(
+    w: &Workspace,
+    root: &Path,
+    tools: &dyn Tools,
+    options: &Options,
+) -> Result<Report, String> {
     let project = w.project();
     let wsb = root.join(".wsb");
     fs::create_dir_all(&wsb).map_err(|e| format!("{}: {e}", wsb.display()))?;
@@ -371,7 +476,13 @@ pub fn build(w: &Workspace, root: &Path, tools: &dyn Tools, jobs: usize) -> Resu
                 Err(e) => (Vec::new(), Some(e)),
             },
         };
-        let jar_names: Vec<String> = jars.iter().map(|p| p.display().to_string()).collect();
+        // By name alone, since where the jars are differs between machines. A
+        // published jar's name includes its version, and it never changes.
+        let jar_names: Vec<String> = jars
+            .iter()
+            .filter_map(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .collect();
 
         let setting = |name: &str| w.value(&format!("{module}.{name}"));
         let jvm_target = match setting("jvmTarget") {
@@ -397,6 +508,7 @@ pub fn build(w: &Workspace, root: &Path, tools: &dyn Tools, jobs: usize) -> Resu
             .map_err(define)?;
         // Everything the compilation depends on, as one string.
         let mut parts = vec![
+            Ir::Const(text(&tools.compiler())),
             Ir::Const(text(&text_of(setting("kotlin")))),
             Ir::Const(text(&jvm_target.to_string())),
             Ir::Const(text(&warnings_as_errors.to_string())),
@@ -480,6 +592,21 @@ pub fn build(w: &Workspace, root: &Path, tools: &dyn Tools, jobs: usize) -> Resu
                 });
                 continue;
             }
+            if let Some(cache) = &options.cache {
+                let started = Instant::now();
+                if let Some(api) = restore(&cache_entry(cache, &key), &out_of(module)) {
+                    let old = state.modules.get(module).map(|(_, a)| a.clone());
+                    let api_changed = old.as_deref() != Some(api.as_str());
+                    graph.set_value(plan.api, text(&api)).map_err(define)?;
+                    state.modules.insert(module.clone(), (key, api));
+                    report.outcomes.push(Outcome {
+                        module: module.clone(),
+                        status: Status::Restored { api_changed },
+                        took: started.elapsed(),
+                    });
+                    continue;
+                }
+            }
             let mut classpath: Vec<PathBuf> = plan
                 .upstream
                 .iter()
@@ -501,7 +628,7 @@ pub fn build(w: &Workspace, root: &Path, tools: &dyn Tools, jobs: usize) -> Resu
             ));
         }
 
-        for batch in work.chunks(jobs.max(1)) {
+        for batch in work.chunks(options.jobs.max(1)) {
             for (_, request) in batch {
                 if let Some(parent) = request.out.parent() {
                     fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
@@ -535,6 +662,19 @@ pub fn build(w: &Workspace, root: &Path, tools: &dyn Tools, jobs: usize) -> Resu
                         graph
                             .set_value(plans[module].api, text(&api))
                             .map_err(define)?;
+                        if let Some(cache) = &options.cache {
+                            let entry = cache_entry(cache, key);
+                            if let Err(e) = entry
+                                .parent()
+                                .ok_or_else(|| "no parent folder".to_string())
+                                .and_then(|d| fs::create_dir_all(d).map_err(|e| e.to_string()))
+                                .and_then(|()| store(&entry, &request.out, &api, module))
+                            {
+                                report
+                                    .warnings
+                                    .push(format!("could not cache {module}: {e}"));
+                            }
+                        }
                         state.modules.insert(module.clone(), (key.clone(), api));
                         Status::Compiled { api_changed }
                     }

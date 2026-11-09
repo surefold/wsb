@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use watershed_build::Workspace;
-use watershed_build::build::{Jvm, Report, Status, build};
+use watershed_build::build::{Jvm, Options, Report, Status, build};
 
 fn no_env(_: &str) -> Option<String> {
     None
@@ -46,7 +46,11 @@ impl Project {
 
     fn build(&self) -> Report {
         let w = Workspace::new(FILE, &no_env).unwrap();
-        build(&w, &self.root, &Jvm, 2).unwrap()
+        let options = Options {
+            jobs: 2,
+            cache: None,
+        };
+        build(&w, &self.root, &Jvm, &options).unwrap()
     }
 }
 

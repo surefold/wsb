@@ -163,8 +163,12 @@ null. Anything unclear counts as a change, because a needless compile only
 costs time. So adding a private member recompiles the modules above it, and a
 module whose sources mention `inline` has all its code counted.
 
-`.wsb/state` remembers the last build, so this is a cache of one result per
-module, on this machine. Changing a file and changing it back compiles twice.
+Every result is also kept in a cache folder (`~/.cache/wsb`, or `$WSB_CACHE`),
+under the hash of what it was built from. Going back to earlier sources, or
+building the same sources in another checkout, copies the classes instead of
+compiling (`--no-cache` turns this off). Only share a cache folder with people
+you trust. Nothing removes old results yet, so the folder only grows; deleting
+it is always safe.
 
 For now `wsb build` uses whichever `kotlinc` is installed, and says so if the
 `kotlin` setting asks for a different version.
@@ -199,8 +203,8 @@ for IntelliJ IDEA and VS Code. Its README says how to install it.
 - **A language server.** It would reuse this parser to give errors as you
   type, completion of settings and names, go to definition, and hovering over
   any value to see it and its `explain` tree, in IntelliJ and VS Code.
-- **A shared build cache:** results stored by the hash of what went into them,
-  so going back to an earlier state, or another machine's build, costs nothing.
+- **A remote build cache**, so a team or CI can share results over the network,
+  and a limit on the size of the local one.
 - **The Kotlin version a module asks for**, fetched rather than taken from the
   `PATH`.
 - **Resolving versions** across modules (with Coursier at first), with
