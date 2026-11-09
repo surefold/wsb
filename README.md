@@ -102,9 +102,12 @@ error: there is no setting `jvmTaget`
 | `dependsOn(a, b)` | this module uses modules `a` and `b` |
 | `dependency("g:a:1.0")` | a Maven dependency |
 | `dependency("g:a", expr)` | a Maven dependency whose version is worked out |
+| `dependency("g:a:$version")` | the same, with the version in a template |
 | `env("NAME")` | an environment variable, as a String (`""` when unset) |
 | `if (c) a else b` | a condition; the `else` is required |
 | `+ - * /`, `== != < <= > >=`, `&& \|\| !` | as in Kotlin |
+| `"a" + "b"` | two Strings joined |
+| `"v$major.${minor + 1}"` | a template: values of any type, shown as text |
 | `min(a, b)`, `max(a, b)`, `abs(a)` | on Ints or Doubles |
 | `core.jvmTarget`, `core.x` | another module's setting or value |
 | `// ...`, `/* ... */` | comments |
@@ -113,6 +116,13 @@ The types are `Int`, `Double`, `Boolean` and `String`. Int and Double are not
 mixed silently (`1 + 2.5` is an error: write `1.0`). A line ends a statement,
 as in Kotlin. A value cannot depend on itself, and modules cannot depend on
 each other in a loop; both are reported with the loop spelt out.
+
+A template follows Kotlin's rules. `$name` stops at the end of the name, so
+`"$a.b"` is `a` followed by `.b`; write `"${a.b}"` for another module's value.
+A `$` that starts neither is an ordinary character, and `\$` is always one. A
+string, and everything in it, stays on one line. Text cannot grow past 1 MiB:
+a join that would is an error value, as an integer overflow is. Very large and
+very small Doubles are shown in a form that can differ from Kotlin's.
 
 Each module has every setting, so `core.kotlin` always means something. One a
 module does not set comes from `defaults.kotlin`, which is the built-in
@@ -148,8 +158,6 @@ for IntelliJ IDEA and VS Code. Its README says how to install it.
 - **A language server.** It would reuse this parser to give errors as you
   type, completion of settings and names, go to definition, and hovering over
   any value to see it and its `explain` tree, in IntelliJ and VS Code.
-- **Joining strings and string templates** (`"$group:core:$version"`), which
-  need string concatenation in the engine.
 - **Lists and conditional dependencies** (`dependency(...)` only on some
   platforms).
 - **Tasks:** nodes that run Rust code, such as resolving dependencies and

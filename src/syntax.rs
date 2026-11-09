@@ -17,13 +17,17 @@
 //! sum      := product (('+' | '-') product)*
 //! product  := unary (('*' | '/') unary)*
 //! unary    := ('!' | '-') unary | primary
-//! primary  := INT | DOUBLE | STRING | 'true' | 'false' | '(' expr ')'
+//! primary  := INT | DOUBLE | STRING | TEMPLATE | 'true' | 'false' | '(' expr ')'
 //!           | NAME ('.' NAME)?            a value, or another module's setting
 //!           | NAME '(' (expr (',' expr)*)? ')'   env, min, max or abs
 //! ```
 //!
 //! Lines end statements, as in Kotlin, so `;` is optional. Comments are
 //! `// to the end of the line` and `/* between markers */`.
+//!
+//! A string containing `$name` or `${expr}` is a TEMPLATE, as in Kotlin. Any
+//! other `$` is an ordinary character. A string stays on one line, and so does
+//! everything in it.
 
 use std::ops::Range;
 
@@ -37,6 +41,10 @@ pub enum Token {
     Int(i64),
     Double(f64),
     Str(String),
+    /// A string with `$name` or `${expr}` in it.
+    Template(Vec<RawPart>),
+    /// Where the expression in a template stops.
+    TemplateEnd,
     LParen,
     RParen,
     LBrace,
@@ -67,7 +75,7 @@ impl Token {
             Token::Name(n) => format!("`{n}`"),
             Token::Int(i) => format!("`{i}`"),
             Token::Double(d) => format!("`{d}`"),
-            Token::Str(_) => "a string".into(),
+            Token::Str(_) | Token::Template(_) => "a string".into(),
             Token::Eof => "the end of the file".into(),
             other => format!("`{}`", other.symbol()),
         }
@@ -96,12 +104,21 @@ impl Token {
             Token::Ge => ">=",
             Token::AndAnd => "&&",
             Token::OrOr => "||",
+            Token::TemplateEnd => "}",
             _ => "?",
         }
     }
 }
 
-#[derive(Debug, Clone)]
+/// A piece of a template, before parsing.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RawPart {
+    Text(String),
+    /// The tokens of an expression, ending with [`Token::TemplateEnd`].
+    Tokens(Vec<Spanned>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Spanned {
     pub token: Token,
     pub span: Span,
@@ -110,13 +127,49 @@ pub struct Spanned {
 }
 
 pub fn tokenize(src: &str) -> Result<Vec<Spanned>, Diagnostic> {
+    Ok(lex(src, 0, None)?.0)
+}
+
+fn never_closed(start: usize) -> Diagnostic {
+    Diagnostic::new("this template is never closed", start..start + 2)
+        .help("end it with `}` on the same line")
+}
+
+/// Reads tokens from `from`. `template` is where a `${` started, if these are
+/// the tokens inside one: reading then stops after its closing `}`. Returns
+/// the tokens and where reading stopped. Spans are always positions in `src`.
+fn lex(
+    src: &str,
+    from: usize,
+    template: Option<usize>,
+) -> Result<(Vec<Spanned>, usize), Diagnostic> {
     let bytes = src.as_bytes();
     let mut out = Vec::new();
-    let mut i = 0;
-    let mut newline = true;
+    let mut i = from;
+    let mut newline = template.is_none();
+    // Braces opened inside a template, so its own `}` can be told apart.
+    let mut depth = 0;
     while i < bytes.len() {
         let c = bytes[i];
+        if template.is_some() {
+            match c {
+                b'}' if depth == 0 => {
+                    out.push(Spanned {
+                        token: Token::TemplateEnd,
+                        span: i..i + 1,
+                        newline_before: false,
+                    });
+                    return Ok((out, i + 1));
+                }
+                b'}' => depth -= 1,
+                b'{' => depth += 1,
+                _ => {}
+            }
+        }
         if c == b'\n' {
+            if let Some(start) = template {
+                return Err(never_closed(start));
+            }
             newline = true;
             i += 1;
             continue;
@@ -182,57 +235,9 @@ pub fn tokenize(src: &str) -> Result<Vec<Spanned>, Diagnostic> {
                 }
             }
         } else if c == b'"' {
-            i += 1;
-            let mut text = String::new();
-            loop {
-                let Some(ch) = src[i..].chars().next() else {
-                    return Err(
-                        Diagnostic::new("this string is never closed", start..start + 1)
-                            .help("end it with `\"` on the same line"),
-                    );
-                };
-                match ch {
-                    '"' => {
-                        i += 1;
-                        break;
-                    }
-                    '\n' => {
-                        return Err(Diagnostic::new("this string is never closed", start..i)
-                            .help("end it with `\"` on the same line"));
-                    }
-                    '\\' => {
-                        let escaped = src[i + 1..].chars().next();
-                        let replacement = match escaped {
-                            Some('"') => '"',
-                            Some('\\') => '\\',
-                            Some('n') => '\n',
-                            Some('t') => '\t',
-                            Some('$') => '$',
-                            _ => {
-                                return Err(Diagnostic::new(
-                                    "unknown escape",
-                                    i..i + 1 + escaped.map_or(0, char::len_utf8),
-                                )
-                                .help("the escapes are \\\" \\\\ \\n \\t and \\$"));
-                            }
-                        };
-                        text.push(replacement);
-                        i += 1 + escaped.map_or(0, char::len_utf8);
-                    }
-                    '$' => {
-                        return Err(Diagnostic::new(
-                            "string templates are not supported yet",
-                            i..i + 1,
-                        )
-                        .help("write `\\$` for a dollar sign"));
-                    }
-                    ch => {
-                        text.push(ch);
-                        i += ch.len_utf8();
-                    }
-                }
-            }
-            Token::Str(text)
+            let (token, end) = string(src, start)?;
+            i = end;
+            token
         } else {
             let two = src.get(i..i + 2).unwrap_or("");
             let (token, len) = match two {
@@ -280,12 +285,106 @@ pub fn tokenize(src: &str) -> Result<Vec<Spanned>, Diagnostic> {
         });
         newline = false;
     }
+    if let Some(start) = template {
+        return Err(never_closed(start));
+    }
     out.push(Spanned {
         token: Token::Eof,
         span: src.len()..src.len(),
         newline_before: true,
     });
-    Ok(out)
+    Ok((out, i))
+}
+
+/// Reads the string starting at the `"` at `start`. Returns its token and
+/// where it ends.
+fn string(src: &str, start: usize) -> Result<(Token, usize), Diagnostic> {
+    let bytes = src.as_bytes();
+    let mut i = start + 1;
+    let mut text = String::new();
+    let mut parts = Vec::new();
+    loop {
+        let Some(ch) = src[i..].chars().next() else {
+            return Err(
+                Diagnostic::new("this string is never closed", start..start + 1)
+                    .help("end it with `\"` on the same line"),
+            );
+        };
+        match ch {
+            '"' => {
+                i += 1;
+                break;
+            }
+            '\n' => {
+                return Err(Diagnostic::new("this string is never closed", start..i)
+                    .help("end it with `\"` on the same line"));
+            }
+            '\\' => {
+                let escaped = src[i + 1..].chars().next();
+                let replacement = match escaped {
+                    Some('"') => '"',
+                    Some('\\') => '\\',
+                    Some('n') => '\n',
+                    Some('t') => '\t',
+                    Some('$') => '$',
+                    _ => {
+                        return Err(Diagnostic::new(
+                            "unknown escape",
+                            i..i + 1 + escaped.map_or(0, char::len_utf8),
+                        )
+                        .help("the escapes are \\\" \\\\ \\n \\t and \\$"));
+                    }
+                };
+                text.push(replacement);
+                i += 1 + escaped.map_or(0, char::len_utf8);
+            }
+            '$' if bytes.get(i + 1) == Some(&b'{') => {
+                flush(&mut text, &mut parts);
+                let (tokens, end) = lex(src, i + 2, Some(i))?;
+                parts.push(RawPart::Tokens(tokens));
+                i = end;
+            }
+            '$' if bytes
+                .get(i + 1)
+                .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_') =>
+            {
+                flush(&mut text, &mut parts);
+                let name_start = i + 1;
+                i = name_start;
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                parts.push(RawPart::Tokens(vec![
+                    Spanned {
+                        token: Token::Name(src[name_start..i].to_string()),
+                        span: name_start..i,
+                        newline_before: false,
+                    },
+                    Spanned {
+                        token: Token::TemplateEnd,
+                        span: i..i,
+                        newline_before: false,
+                    },
+                ]));
+            }
+            ch => {
+                text.push(ch);
+                i += ch.len_utf8();
+            }
+        }
+    }
+    if parts.is_empty() {
+        return Ok((Token::Str(text), i));
+    }
+    flush(&mut text, &mut parts);
+    Ok((Token::Template(parts), i))
+}
+
+/// Ends a run of plain text in a template.
+fn flush(text: &mut String, parts: &mut Vec<RawPart>) {
+    if !text.is_empty() {
+        parts.push(RawPart::Text(std::mem::take(text)));
+    }
 }
 
 // ------------------------------------------------------------------ syntax tree
@@ -342,6 +441,8 @@ pub enum ExprKind {
     Int(i64),
     Double(f64),
     Str(String),
+    /// A string with values filled in. Always has at least one part.
+    Template(Vec<TemplatePart>),
     Bool(bool),
     /// `name`, or `module.name`.
     Name(Option<Ident>, Ident),
@@ -349,6 +450,13 @@ pub enum ExprKind {
     Unary(UnaryOp, Box<Expr>),
     Binary(BinaryOp, Box<Expr>, Box<Expr>),
     If(Box<Expr>, Box<Expr>, Box<Expr>),
+}
+
+/// A piece of a template.
+#[derive(Debug, Clone)]
+pub enum TemplatePart {
+    Text(String),
+    Expr(Expr),
 }
 
 #[derive(Debug, Clone)]
@@ -654,6 +762,21 @@ impl Parser {
             Token::Int(n) => ExprKind::Int(n),
             Token::Double(d) => ExprKind::Double(d),
             Token::Str(s) => ExprKind::Str(s),
+            Token::Template(parts) => {
+                let mut pieces = Vec::with_capacity(parts.len());
+                for part in parts {
+                    pieces.push(match part {
+                        RawPart::Text(s) => TemplatePart::Text(s),
+                        RawPart::Tokens(tokens) => {
+                            let mut inner = Parser { tokens, at: 0 };
+                            let e = inner.expr()?;
+                            inner.expect(&Token::TemplateEnd, "to end the template")?;
+                            TemplatePart::Expr(e)
+                        }
+                    });
+                }
+                ExprKind::Template(pieces)
+            }
             Token::LParen => {
                 let inner = self.expr()?;
                 let end = self.expect(&Token::RParen, "to close the bracket")?.end;

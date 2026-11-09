@@ -74,6 +74,21 @@
       "patterns": [
         { "name": "constant.character.escape.watershed-build", "match": "\\\\[\"\\\\nt$]" },
         {
+          "name": "meta.template.expression.watershed-build",
+          "begin": "\\$\\{",
+          "end": "\\}",
+          "beginCaptures": { "0": { "name": "punctuation.section.template.begin.watershed-build" } },
+          "endCaptures": { "0": { "name": "punctuation.section.template.end.watershed-build" } },
+          "patterns": [{ "include": "#expressions" }]
+        },
+        {
+          "match": "(\\$)([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "punctuation.section.template.begin.watershed-build" },
+            "2": { "name": "variable.other.template.watershed-build" }
+          }
+        },
+        {
           "match": "([A-Za-z0-9_.\\-]+)(:)([A-Za-z0-9_.\\-]+)(?:(:)([A-Za-z0-9_.\\-+]+))?(?=\")",
           "captures": {
             "1": { "name": "entity.name.namespace.maven-group.watershed-build" },
