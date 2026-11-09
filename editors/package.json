@@ -1,0 +1,27 @@
+{
+  "name": "watershed-build",
+  "displayName": "watershed build files",
+  "description": "Syntax highlighting for watershed build files (.ws)",
+  "version": "0.1.0",
+  "publisher": "watershed",
+  "license": "Apache-2.0",
+  "engines": { "vscode": "^1.60.0" },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "watershed-build",
+        "aliases": ["watershed build", "wsb"],
+        "extensions": [".ws"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "watershed-build",
+        "scopeName": "source.watershed-build",
+        "path": "./syntaxes/watershed-build.tmLanguage.json"
+      }
+    ]
+  }
+}

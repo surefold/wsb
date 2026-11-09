@@ -1,0 +1,89 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "watershed build",
+  "scopeName": "source.watershed-build",
+  "fileTypes": ["ws"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#declarations" },
+    { "include": "#expressions" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "name": "comment.line.double-slash.watershed-build", "match": "//.*$" },
+        { "name": "comment.block.watershed-build", "begin": "/\\*", "end": "\\*/" }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "\\b(module)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.other.module.watershed-build" },
+            "2": { "name": "entity.name.type.module.watershed-build" }
+          }
+        },
+        {
+          "match": "\\b(val)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.val.watershed-build" },
+            "2": { "name": "variable.other.definition.watershed-build" }
+          }
+        },
+        { "name": "keyword.other.defaults.watershed-build", "match": "\\bdefaults\\b" },
+        {
+          "match": "^\\s*(kotlin|jvmTarget|group|version|mainClass|warningsAsErrors)\\s*(?==)",
+          "captures": { "1": { "name": "variable.other.property.setting.watershed-build" } }
+        },
+        {
+          "match": "\\b(dependsOn|dependency)\\s*(?=\\()",
+          "captures": { "1": { "name": "keyword.other.dependency.watershed-build" } }
+        }
+      ]
+    },
+    "expressions": {
+      "patterns": [
+        { "include": "#comments" },
+        { "include": "#strings" },
+        { "name": "keyword.control.conditional.watershed-build", "match": "\\b(if|else)\\b" },
+        { "name": "constant.language.boolean.watershed-build", "match": "\\b(true|false)\\b" },
+        { "name": "constant.numeric.decimal.watershed-build", "match": "\\b[0-9][0-9_]*(\\.[0-9][0-9_]*)?\\b" },
+        {
+          "match": "\\b(env|min|max|abs)\\s*(?=\\()",
+          "captures": { "1": { "name": "support.function.builtin.watershed-build" } }
+        },
+        {
+          "match": "\\b([A-Za-z_][A-Za-z0-9_]*)(\\.)(kotlin|jvmTarget|group|version|mainClass|warningsAsErrors)\\b",
+          "captures": {
+            "1": { "name": "entity.name.type.module.watershed-build" },
+            "2": { "name": "punctuation.accessor.watershed-build" },
+            "3": { "name": "variable.other.property.setting.watershed-build" }
+          }
+        },
+        { "name": "keyword.operator.logical.watershed-build", "match": "&&|\\|\\||!(?!=)" },
+        { "name": "keyword.operator.comparison.watershed-build", "match": "==|!=|<=|>=|<|>" },
+        { "name": "keyword.operator.arithmetic.watershed-build", "match": "[+\\-*/]" },
+        { "name": "keyword.operator.assignment.watershed-build", "match": "=" }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.watershed-build",
+      "begin": "\"",
+      "end": "\"|$",
+      "patterns": [
+        { "name": "constant.character.escape.watershed-build", "match": "\\\\[\"\\\\nt$]" },
+        {
+          "match": "([A-Za-z0-9_.\\-]+)(:)([A-Za-z0-9_.\\-]+)(?:(:)([A-Za-z0-9_.\\-+]+))?(?=\")",
+          "captures": {
+            "1": { "name": "entity.name.namespace.maven-group.watershed-build" },
+            "2": { "name": "punctuation.separator.watershed-build" },
+            "3": { "name": "entity.name.package.maven-artifact.watershed-build" },
+            "4": { "name": "punctuation.separator.watershed-build" },
+            "5": { "name": "constant.other.version.watershed-build" }
+          }
+        }
+      ]
+    }
+  }
+}

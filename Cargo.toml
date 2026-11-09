@@ -1,0 +1,17 @@
+[package]
+name = "watershed-build"
+version = "0.1.0"
+description = "A typed build file language, evaluated incrementally by watershed"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "wsb"
+path = "src/bin/wsb.rs"
+
+[dependencies]
+watershed-core = { path = "../watershed-core" }
+
+[lints]
+workspace = true
