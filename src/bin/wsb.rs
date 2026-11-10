@@ -19,6 +19,7 @@ usage:
   wsb [options] watch           show what changes each time the file is saved
   wsb [options] build [-j N] [--no-cache]
                                 compile the modules, skipping what has not changed
+  wsb lsp                       a language server for editors, on standard input and output
   wsb settings                  the settings a module can have
 
 options:
@@ -76,6 +77,13 @@ fn main() -> ExitCode {
             Ok(options) => run_build(&file, &env, &options),
             Err(e) => fail(&e),
         },
+        ["lsp"] => {
+            let stdin = std::io::stdin();
+            match watershed_build::lsp::run(stdin.lock(), std::io::stdout().lock(), &env) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => fail(&e.to_string()),
+            }
+        }
         ["settings"] => {
             for s in SETTINGS {
                 println!(

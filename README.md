@@ -195,14 +195,17 @@ what loading the final file from scratch gives.
 
 ## Editor support
 
+`wsb lsp` is a language server. It gives errors as you type, hovering over a
+value to see it and its `explain` tree, go to definition, and completion of
+settings and names. It works from any editor that can start a language server.
+In IntelliJ IDEA, install the LSP4IJ plugin and add a server with the command
+`wsb lsp` for files matching `*.ws`.
+
 `editors/watershed-build` (at the top of the repository) is a TextMate grammar
 for IntelliJ IDEA and VS Code. Its README says how to install it.
 
 ## What comes next
 
-- **A language server.** It would reuse this parser to give errors as you
-  type, completion of settings and names, go to definition, and hovering over
-  any value to see it and its `explain` tree, in IntelliJ and VS Code.
 - **A remote build cache**, so a team or CI can share results over the network,
   and a limit on the size of the local one.
 - **The Kotlin version a module asks for**, fetched rather than taken from the
