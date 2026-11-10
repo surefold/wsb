@@ -15,7 +15,7 @@ val jackson = "2.17.1"
 
 // Every module gets these unless it sets its own.
 defaults {
-    kotlin = "2.1.0"
+    kotlin = "2.4.21"
     group = "com.example"
     warningsAsErrors = ci
 }

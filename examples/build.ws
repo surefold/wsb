@@ -10,7 +10,7 @@ val base = "com.example"
 
 // Every module gets these unless it sets its own.
 defaults {
-    kotlin = "2.1.0"
+    kotlin = "2.4.21"
     group = base
     warningsAsErrors = ci
     freeCompilerArgs = listOf("-progressive")
