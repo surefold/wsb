@@ -24,7 +24,7 @@
 //! let ci = |var: &str| (var == "CI").then(|| "true".to_string());
 //! let w = Workspace::new(src, &ci).unwrap();
 //! assert_eq!(w.value("app.jvmTarget").unwrap().to_string(), "21");
-//! assert_eq!(w.value("app.kotlin").unwrap().to_string(), "\"2.1.0\""); // the default
+//! assert_eq!(w.value("app.kotlin").unwrap().to_string(), "\"2.4.21\""); // the default
 //! println!("{}", w.explain("app.jvmTarget").unwrap());
 //! ```
 //!

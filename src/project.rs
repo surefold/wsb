@@ -40,7 +40,7 @@ pub const SETTINGS: &[Setting] = &[
     Setting {
         name: "kotlin",
         ty: Type::Str,
-        default: Literal::Str("2.1.0"),
+        default: Literal::Str("2.4.21"),
         about: "the Kotlin compiler version",
     },
     Setting {
