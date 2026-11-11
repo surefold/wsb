@@ -1,7 +1,7 @@
 {
-  "name": "watershed-build",
-  "displayName": "watershed build files",
-  "description": "Syntax highlighting for watershed build files (.ws)",
+  "name": "wsb",
+  "displayName": "wsb build files",
+  "description": "Syntax highlighting for wsb build files (.ws)",
   "version": "0.1.0",
   "publisher": "watershed",
   "license": "Apache-2.0",
@@ -10,17 +10,17 @@
   "contributes": {
     "languages": [
       {
-        "id": "watershed-build",
-        "aliases": ["watershed build", "wsb"],
+        "id": "wsb",
+        "aliases": ["wsb", "wsb"],
         "extensions": [".ws"],
         "configuration": "./language-configuration.json"
       }
     ],
     "grammars": [
       {
-        "language": "watershed-build",
-        "scopeName": "source.watershed-build",
-        "path": "./syntaxes/watershed-build.tmLanguage.json"
+        "language": "wsb",
+        "scopeName": "source.wsb",
+        "path": "./syntaxes/wsb.tmLanguage.json"
       }
     ]
   }

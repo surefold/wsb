@@ -1,8 +1,8 @@
-# watershed-build
+# wsb
 
 A build file language for JVM projects (Kotlin first), and `wsb`, a tool that
 checks, shows, explains and watches build files. Each value in the file is a
-node in a watershed graph. Edit the file and only the values whose formula
+node in a [watershed](https://github.com/surefold/watershed) graph. Edit the file and only the values whose formula
 changed, or that use one that did, are worked out again. Any value can say
 where it came from.
 
@@ -48,10 +48,21 @@ and arithmetic, and it is **typed**. It is also **deterministic**: it cannot
 read files, reach the network or loop. Its only input from outside is
 `env("NAME")`, and that is tracked like any other input.
 
+## Installing
+
+```bash
+cargo install --path .
+```
+
+`wsb build` also needs `kotlinc` and `coursier` on the `PATH` (both are in
+Homebrew). The language itself comes from
+[watershed](https://github.com/surefold/watershed), pinned to a commit in
+`Cargo.toml`.
+
 ## Trying it
 
 ```bash
-cargo run -p watershed-build --bin wsb -- -f crates/watershed-build/examples/build.ws
+cargo run -- -f examples/build.ws
 ```
 
 `wsb show` (the default) lists every module and every setting, and marks the
@@ -201,7 +212,7 @@ settings and names. It works from any editor that can start a language server.
 In IntelliJ IDEA, install the LSP4IJ plugin and add a server with the command
 `wsb lsp` for files matching `*.ws`.
 
-`editors/watershed-build` (at the top of the repository) is a TextMate grammar
+`editors/` is a TextMate grammar
 for IntelliJ IDEA and VS Code. Its README says how to install it.
 
 ## What comes next

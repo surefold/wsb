@@ -1,7 +1,7 @@
 //! The promises of a build file kept live in a graph. As in the engine's
 //! tests, each test is one promise, named as a sentence.
 
-use watershed_build::{Change, Workspace};
+use wsb::{Change, Workspace};
 
 fn no_env(_: &str) -> Option<String> {
     None

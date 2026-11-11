@@ -1,0 +1,104 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "wsb",
+  "scopeName": "source.wsb",
+  "fileTypes": ["ws"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#declarations" },
+    { "include": "#expressions" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "name": "comment.line.double-slash.wsb", "match": "//.*$" },
+        { "name": "comment.block.wsb", "begin": "/\\*", "end": "\\*/" }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "\\b(module)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.other.module.wsb" },
+            "2": { "name": "entity.name.type.module.wsb" }
+          }
+        },
+        {
+          "match": "\\b(val)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.val.wsb" },
+            "2": { "name": "variable.other.definition.wsb" }
+          }
+        },
+        { "name": "keyword.other.defaults.wsb", "match": "\\bdefaults\\b" },
+        {
+          "match": "^\\s*(kotlin|jvmTarget|group|version|mainClass|warningsAsErrors|freeCompilerArgs)\\s*(?==)",
+          "captures": { "1": { "name": "variable.other.property.setting.wsb" } }
+        },
+        {
+          "match": "\\b(dependsOn|dependency)\\s*(?=\\()",
+          "captures": { "1": { "name": "keyword.other.dependency.wsb" } }
+        }
+      ]
+    },
+    "expressions": {
+      "patterns": [
+        { "include": "#comments" },
+        { "include": "#strings" },
+        { "name": "keyword.control.conditional.wsb", "match": "\\b(if|else)\\b" },
+        { "name": "constant.language.boolean.wsb", "match": "\\b(true|false)\\b" },
+        { "name": "constant.numeric.decimal.wsb", "match": "\\b[0-9][0-9_]*(\\.[0-9][0-9_]*)?\\b" },
+        {
+          "match": "\\b(env|min|max|abs|listOf|join)\\s*(?=\\()",
+          "captures": { "1": { "name": "support.function.builtin.wsb" } }
+        },
+        {
+          "match": "\\b([A-Za-z_][A-Za-z0-9_]*)(\\.)(kotlin|jvmTarget|group|version|mainClass|warningsAsErrors|freeCompilerArgs)\\b",
+          "captures": {
+            "1": { "name": "entity.name.type.module.wsb" },
+            "2": { "name": "punctuation.accessor.wsb" },
+            "3": { "name": "variable.other.property.setting.wsb" }
+          }
+        },
+        { "name": "keyword.operator.logical.wsb", "match": "&&|\\|\\||!(?!=)" },
+        { "name": "keyword.operator.comparison.wsb", "match": "==|!=|<=|>=|<|>" },
+        { "name": "keyword.operator.arithmetic.wsb", "match": "[+\\-*/]" },
+        { "name": "keyword.operator.assignment.wsb", "match": "=" }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.wsb",
+      "begin": "\"",
+      "end": "\"|$",
+      "patterns": [
+        { "name": "constant.character.escape.wsb", "match": "\\\\[\"\\\\nt$]" },
+        {
+          "name": "meta.template.expression.wsb",
+          "begin": "\\$\\{",
+          "end": "\\}",
+          "beginCaptures": { "0": { "name": "punctuation.section.template.begin.wsb" } },
+          "endCaptures": { "0": { "name": "punctuation.section.template.end.wsb" } },
+          "patterns": [{ "include": "#expressions" }]
+        },
+        {
+          "match": "(\\$)([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "punctuation.section.template.begin.wsb" },
+            "2": { "name": "variable.other.template.wsb" }
+          }
+        },
+        {
+          "match": "([A-Za-z0-9_.\\-]+)(:)([A-Za-z0-9_.\\-]+)(?:(:)([A-Za-z0-9_.\\-+]+))?(?=\")",
+          "captures": {
+            "1": { "name": "entity.name.namespace.maven-group.wsb" },
+            "2": { "name": "punctuation.separator.wsb" },
+            "3": { "name": "entity.name.package.maven-artifact.wsb" },
+            "4": { "name": "punctuation.separator.wsb" },
+            "5": { "name": "constant.other.version.wsb" }
+          }
+        }
+      ]
+    }
+  }
+}

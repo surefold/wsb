@@ -7,8 +7,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use watershed_build::Workspace;
-use watershed_build::build::{Jvm, Options, Report, Status, Tools, WarmJvm, build};
+use wsb::Workspace;
+use wsb::build::{Jvm, Options, Report, Status, Tools, WarmJvm, build};
 
 fn no_env(_: &str) -> Option<String> {
     None
@@ -60,7 +60,7 @@ impl Project {
     /// Every class file under `.wsb/out`, by its path there.
     fn classes(&self) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
         let out = self.root.join(".wsb/out");
-        watershed_build::abi::files_under(&out)
+        wsb::abi::files_under(&out)
             .unwrap()
             .into_iter()
             .map(|f| {

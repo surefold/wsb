@@ -1,18 +1,31 @@
 [package]
-name = "watershed-build"
+name = "wsb"
 version = "0.1.0"
-description = "A typed build file language, evaluated incrementally by watershed"
-edition.workspace = true
-license.workspace = true
-rust-version.workspace = true
+description = "A typed build file language for JVM projects, evaluated incrementally by watershed"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.85"
 
 [[bin]]
 name = "wsb"
 path = "src/bin/wsb.rs"
+# The library has the same name; its documentation is the one to keep.
+doc = false
 
 [dependencies]
-watershed-core = { path = "../watershed-core" }
+# The engine, pinned to a commit of github.com/surefold/watershed. To use a
+# newer engine, change the commit and run `cargo update -p watershed-core`.
+watershed-core = { git = "https://github.com/surefold/watershed", rev = "dd7a9db51a9de78a1b173ea43d680dc59c40172f" }
 serde_json = "1"
 
-[lints]
-workspace = true
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+# `cargo test` only: the random property tests spend most of their time in
+# unoptimised code. Light optimisation makes them much faster for a few
+# seconds of extra compiling. Debug assertions and overflow checks stay on.
+[profile.test]
+opt-level = 1

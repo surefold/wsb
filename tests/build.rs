@@ -9,9 +9,9 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use watershed_build::Workspace;
-use watershed_build::abi;
-use watershed_build::build::{CompileRequest, Options, Report, Status, Tools, build};
+use wsb::Workspace;
+use wsb::abi;
+use wsb::build::{CompileRequest, Options, Report, Status, Tools, build};
 
 fn no_env(_: &str) -> Option<String> {
     None

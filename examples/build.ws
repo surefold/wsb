@@ -1,5 +1,5 @@
 // An example build file. Try:
-//   cargo run -p watershed-build --bin wsb -- -f crates/watershed-build/examples/build.ws
+//   cargo run -- -f examples/build.ws
 //   ... explain app.jvmTarget
 //   ... -e CI=true explain app.jvmTarget
 //   ... watch          (then edit this file and save)

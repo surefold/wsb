@@ -1,4 +1,4 @@
-# Syntax highlighting for watershed build files
+# Syntax highlighting for wsb build files
 
 A TextMate grammar for `.ws` build files, laid out as a VS Code extension so
 the same folder works in both editors.
@@ -6,7 +6,7 @@ the same folder works in both editors.
 ## IntelliJ IDEA (and other JetBrains IDEs, Community included)
 
 1. *Settings → Editor → TextMate Bundles → +*
-2. Choose this folder (`editors/watershed-build`) and press OK.
+2. Choose this folder (`editors`) and press OK.
 3. Open any `.ws` file.
 
 If `.ws` files still open as plain text, remove `*.ws` from *Settings → Editor
@@ -17,7 +17,7 @@ If `.ws` files still open as plain text, remove `*.ws` from *Settings → Editor
 Copy or link this folder into your extensions folder and restart VS Code:
 
 ```bash
-ln -s "$PWD/editors/watershed-build" ~/.vscode/extensions/watershed-build
+ln -s "$PWD/editors" ~/.vscode/extensions/wsb
 ```
 
 ## What it highlights

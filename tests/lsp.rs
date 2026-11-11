@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
 use serde_json::{Value, json};
-use watershed_build::lsp::Server;
+use wsb::lsp::Server;
 
 const URI: &str = "file:///build.ws";
 

@@ -5,9 +5,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use watershed_build::build::{Jvm, Options, Status, Tools, WarmJvm, build};
-use watershed_build::workspace::text_of;
-use watershed_build::{Kind, SETTINGS, Workspace};
+use wsb::build::{Jvm, Options, Status, Tools, WarmJvm, build};
+use wsb::workspace::text_of;
+use wsb::{Kind, SETTINGS, Workspace};
 
 const USAGE: &str = "\
 wsb: a typed build file, worked out incrementally
@@ -82,7 +82,7 @@ fn main() -> ExitCode {
         ["daemon", "stop"] => stop_daemon(),
         ["lsp"] => {
             let stdin = std::io::stdin();
-            match watershed_build::lsp::run(stdin.lock(), std::io::stdout().lock(), &env) {
+            match wsb::lsp::run(stdin.lock(), std::io::stdout().lock(), &env) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => fail(&e.to_string()),
             }
@@ -92,7 +92,7 @@ fn main() -> ExitCode {
                 println!(
                     "  {:<18} {:<8} {}",
                     s.name,
-                    watershed_build::project::type_name(s.ty),
+                    wsb::project::type_name(s.ty),
                     s.about
                 );
             }
@@ -126,9 +126,9 @@ fn default_cache() -> Option<PathBuf> {
 
 /// Stops the compile server for the `kotlinc` on the `PATH`.
 fn stop_daemon() -> ExitCode {
-    let daemon = watershed_build::daemon::KotlinHome::find()
+    let daemon = wsb::daemon::KotlinHome::find()
         .ok_or_else(|| "could not find the Kotlin installation of `kotlinc`".to_string())
-        .and_then(|home| watershed_build::daemon::Daemon::new(home).map_err(|e| e.to_string()));
+        .and_then(|home| wsb::daemon::Daemon::new(home).map_err(|e| e.to_string()));
     match daemon.and_then(|d| d.stop().map_err(|e| e.to_string())) {
         Ok(true) => {
             println!("stopped the compile server");
@@ -282,8 +282,7 @@ fn show(w: &Workspace) -> String {
             let name = format!("{}.{}", m.name, s.name);
             let inherited = w.binding(&name).is_some_and(|b| {
                 b.kind == Kind::Setting
-                    && b.plan
-                        == watershed_build::project::Plan::Node(format!("defaults.{}", s.name))
+                    && b.plan == wsb::project::Plan::Node(format!("defaults.{}", s.name))
             });
             let note = if inherited { "   (from defaults)" } else { "" };
             out += &format!("  {:<width$}  {}{note}\n", s.name, value(&name));

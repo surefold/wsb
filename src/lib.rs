@@ -1,4 +1,4 @@
-//! # watershed-build
+//! # wsb
 //!
 //! A typed, deterministic build file language whose values live in a
 //! watershed graph. Edit the file and only the values whose formula changed,
@@ -6,7 +6,7 @@
 //! it explains where it came from.
 //!
 //! ```
-//! use watershed_build::Workspace;
+//! use wsb::Workspace;
 //!
 //! let src = r#"
 //!     val ci = env("CI") == "true"
@@ -31,7 +31,7 @@
 //! A typo is an error, not a setting that is quietly ignored:
 //!
 //! ```
-//! use watershed_build::{Workspace, process_env};
+//! use wsb::{Workspace, process_env};
 //!
 //! let err = Workspace::new("module app { jvmTaget = 21 }", &process_env).err().unwrap();
 //! assert_eq!(err.message, "there is no setting `jvmTaget`");

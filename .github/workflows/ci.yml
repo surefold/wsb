@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same branch or pull request cancels the older run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# Every job runs on the surefold organisation's self-hosted Mac, as watershed's
+# do. It is someone's own computer, so each job starts with the `rust-homes`
+# step below, which gives CI its own copy of Rust and the downloaded crates.
+#
+# Each job stops after 30 minutes, so a step that hangs cannot hold the one
+# runner for GitHub's default of six hours.
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  format:
+    name: Formatting
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 30
+    steps:
+      # Written out once here; the other jobs reuse it as `*rust-homes`.
+      - &rust-homes
+        name: Use this runner's own Rust folders
+        shell: bash
+        run: |
+          export CARGO_HOME="$RUNNER_WORKSPACE/.cargo"
+          export RUSTUP_HOME="$RUNNER_WORKSPACE/.rustup"
+          curl --proto '=https' --tlsv1.2 --retry 10 --retry-connrefused --location --silent --show-error --fail https://sh.rustup.rs | sh -s -- --default-toolchain none --no-modify-path -y
+          echo "CARGO_HOME=$CARGO_HOME" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=$RUSTUP_HOME" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$RUNNER_WORKSPACE/target/${{ github.job }}-${{ matrix.rust || 'stable' }}" >> "$GITHUB_ENV"
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  lint:
+    name: Lint (clippy)
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 30
+    steps:
+      - *rust-homes
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo clippy --locked --all-targets -- -D warnings
+
+  test:
+    name: Tests (Rust ${{ matrix.rust }})
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # stable, and the oldest version promised (rust-version in Cargo.toml).
+        rust: [stable, "1.85"]
+    steps:
+      - *rust-homes
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+      # The tests that need kotlinc skip themselves, with a message, without it.
+      - run: cargo test --locked
+
+  docs:
+    name: Docs
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 30
+    steps:
+      - *rust-homes
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo doc --locked --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  examples:
+    name: Example build file
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 30
+    steps:
+      - *rust-homes
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo run --locked -- -f examples/build.ws show
+      - run: cargo run --locked -- -f examples/build.ws -e CI=true explain app.jvmTarget
