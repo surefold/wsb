@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use watershed_build::build::{Jvm, Options, Status, build};
+use watershed_build::build::{Jvm, Options, Status, Tools, WarmJvm, build};
 use watershed_build::workspace::text_of;
 use watershed_build::{Kind, SETTINGS, Workspace};
 
@@ -17,8 +17,9 @@ usage:
   wsb [options] check           report errors, and nothing else
   wsb [options] explain NAME    why a value is what it is (NAME can be part of a name)
   wsb [options] watch           show what changes each time the file is saved
-  wsb [options] build [-j N] [--no-cache]
+  wsb [options] build [-j N] [--no-cache] [--no-daemon]
                                 compile the modules, skipping what has not changed
+  wsb daemon stop               stop the compile server, if it is running
   wsb lsp                       a language server for editors, on standard input and output
   wsb settings                  the settings a module can have
 
@@ -74,9 +75,11 @@ fn main() -> ExitCode {
         ["explain", query] => with_workspace(&file, &env, |w, _| explain(w, query)),
         ["watch"] => watch(&file, &env),
         ["build", rest @ ..] => match build_options(rest) {
-            Ok(options) => run_build(&file, &env, &options),
+            Ok((options, true)) => run_build(&file, &env, &options, &WarmJvm::new()),
+            Ok((options, false)) => run_build(&file, &env, &options, &Jvm),
             Err(e) => fail(&e),
         },
+        ["daemon", "stop"] => stop_daemon(),
         ["lsp"] => {
             let stdin = std::io::stdin();
             match watershed_build::lsp::run(stdin.lock(), std::io::stdout().lock(), &env) {
@@ -121,7 +124,27 @@ fn default_cache() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache/wsb"))
 }
 
-fn build_options(words: &[&str]) -> Result<Options, String> {
+/// Stops the compile server for the `kotlinc` on the `PATH`.
+fn stop_daemon() -> ExitCode {
+    let daemon = watershed_build::daemon::KotlinHome::find()
+        .ok_or_else(|| "could not find the Kotlin installation of `kotlinc`".to_string())
+        .and_then(|home| watershed_build::daemon::Daemon::new(home).map_err(|e| e.to_string()));
+    match daemon.and_then(|d| d.stop().map_err(|e| e.to_string())) {
+        Ok(true) => {
+            println!("stopped the compile server");
+            ExitCode::SUCCESS
+        }
+        Ok(false) => {
+            println!("no compile server was running");
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(&e),
+    }
+}
+
+/// The options, and whether to compile in the compile server.
+fn build_options(words: &[&str]) -> Result<(Options, bool), String> {
+    let mut daemon = true;
     let mut options = Options {
         jobs: default_jobs(),
         cache: default_cache(),
@@ -130,6 +153,7 @@ fn build_options(words: &[&str]) -> Result<Options, String> {
     while let Some(word) = words.next() {
         match *word {
             "--no-cache" => options.cache = None,
+            "--no-daemon" => daemon = false,
             "-j" => {
                 options.jobs = words
                     .next()
@@ -140,10 +164,15 @@ fn build_options(words: &[&str]) -> Result<Options, String> {
             other => return Err(format!("build does not understand `{other}`")),
         }
     }
-    Ok(options)
+    Ok((options, daemon))
 }
 
-fn run_build(file: &str, env: &dyn Fn(&str) -> Option<String>, options: &Options) -> ExitCode {
+fn run_build(
+    file: &str,
+    env: &dyn Fn(&str) -> Option<String>,
+    options: &Options,
+    tools: &dyn Tools,
+) -> ExitCode {
     with_workspace(file, env, |w, _| {
         let root = match std::path::Path::new(file).parent() {
             Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
@@ -160,7 +189,7 @@ fn run_build(file: &str, env: &dyn Fn(&str) -> Option<String>, options: &Options
                 );
             }
         }
-        let report = match build(w, &root, &Jvm, options) {
+        let report = match build(w, &root, tools, options) {
             Ok(report) => report,
             Err(e) => return fail(&e),
         };

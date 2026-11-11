@@ -42,6 +42,7 @@
 
 pub mod abi;
 pub mod build;
+pub mod daemon;
 pub mod diagnostic;
 pub mod lsp;
 pub mod project;

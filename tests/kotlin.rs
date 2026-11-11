@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use watershed_build::Workspace;
-use watershed_build::build::{Jvm, Options, Report, Status, build};
+use watershed_build::build::{Jvm, Options, Report, Status, Tools, WarmJvm, build};
 
 fn no_env(_: &str) -> Option<String> {
     None
@@ -45,12 +45,31 @@ impl Project {
     }
 
     fn build(&self) -> Report {
+        self.build_with(&Jvm)
+    }
+
+    fn build_with(&self, tools: &dyn Tools) -> Report {
         let w = Workspace::new(FILE, &no_env).unwrap();
         let options = Options {
             jobs: 2,
             cache: None,
         };
-        build(&w, &self.root, &Jvm, &options).unwrap()
+        build(&w, &self.root, tools, &options).unwrap()
+    }
+
+    /// Every class file under `.wsb/out`, by its path there.
+    fn classes(&self) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        let out = self.root.join(".wsb/out");
+        watershed_build::abi::files_under(&out)
+            .unwrap()
+            .into_iter()
+            .map(|f| {
+                (
+                    f.strip_prefix(&out).unwrap().to_path_buf(),
+                    fs::read(&f).unwrap(),
+                )
+            })
+            .collect()
     }
 }
 
@@ -172,4 +191,124 @@ fn real_kotlin_reports_a_compile_error_and_blocks_what_depends_on_it() {
         report.status("app"),
         Some(&Status::Blocked("lib".to_string()))
     );
+}
+
+/// A compile server for tests: one that this starts exits after a minute.
+fn server() -> WarmJvm {
+    WarmJvm::with_idle(std::time::Duration::from_secs(60))
+}
+
+/// No `inline`, which would make every change count as an API change.
+const PLAIN: &str = "data class Item(val id: Int, val name: String?)\nfun greeting(name: String): String = \"hello $name\"\n";
+
+const LIB: &str = "data class Item(val id: Int, val name: String?)\n\
+    fun greeting(name: String): String = \"hello $name\"\n\
+    inline fun <reified T> nameOf(): String = T::class.simpleName ?: \"?\"\n";
+
+#[test]
+fn the_compile_server_writes_the_same_classes_as_kotlinc() {
+    if !have_kotlinc() {
+        return;
+    }
+    let (by_kotlinc, by_server) = (Project::new("kotlinc"), Project::new("server"));
+    for p in [&by_kotlinc, &by_server] {
+        p.write("lib/src/Lib.kt", LIB);
+    }
+    assert!(by_kotlinc.build().succeeded());
+    let report = by_server.build_with(&server());
+    assert!(report.succeeded(), "{report:?}");
+    let (expected, found) = (by_kotlinc.classes(), by_server.classes());
+    assert!(!expected.is_empty());
+    assert_eq!(
+        expected.keys().collect::<Vec<_>>(),
+        found.keys().collect::<Vec<_>>()
+    );
+    for (path, bytes) in &expected {
+        assert!(&found[path] == bytes, "{} differs", path.display());
+    }
+}
+
+#[test]
+fn the_compile_server_stops_at_a_body_change_like_kotlinc() {
+    if !have_kotlinc() {
+        return;
+    }
+    let p = Project::new("server-cutoff");
+    let tools = server();
+    p.write("lib/src/Lib.kt", PLAIN);
+    assert_eq!(p.build_with(&tools).compiled(), ["lib", "app"]);
+    p.write("lib/src/Lib.kt", &PLAIN.replace("hello", "goodbye"));
+    assert_eq!(p.build_with(&tools).compiled(), ["lib"]);
+    p.write("lib/src/Lib.kt", &format!("{PLAIN}fun extra(): Int = 1\n"));
+    assert_eq!(p.build_with(&tools).compiled(), ["lib", "app"]);
+}
+
+#[test]
+fn the_compile_server_reports_a_mistake_as_kotlinc_does() {
+    if !have_kotlinc() {
+        return;
+    }
+    let (by_kotlinc, by_server) = (Project::new("kotlinc-error"), Project::new("server-error"));
+    let message = |p: &Project, tools: &dyn Tools| {
+        p.write(
+            "lib/src/Lib.kt",
+            "fun greeting(name: String): String = nmae\n",
+        );
+        match p.build_with(tools).status("lib") {
+            Some(Status::Failed(message)) => message.replace(&p.root.display().to_string(), "ROOT"),
+            other => panic!("expected a failure, got {other:?}"),
+        }
+    };
+    let expected = message(&by_kotlinc, &Jvm);
+    assert!(expected.contains("nmae"), "{expected}");
+    assert_eq!(message(&by_server, &server()), expected);
+}
+
+/// Runs the `wsb` program in `dir`, as someone would from a terminal: the
+/// build file's folder is `.`, so every path it passes on is relative.
+fn wsb_build_in(dir: &std::path::Path) -> String {
+    let output = Command::new(env!("CARGO_BIN_EXE_wsb"))
+        .args(["build", "--no-cache"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+fn the_compile_server_compiles_each_project_from_its_own_folder() {
+    if !have_kotlinc() {
+        return;
+    }
+    // Whichever folder the server was started from, each project must get
+    // its own sources compiled into its own folder.
+    let projects = [Project::new("folder-a"), Project::new("folder-b")];
+    for (p, word) in projects.iter().zip(["first", "second"]) {
+        p.write("build.ws", FILE);
+        p.write(
+            "lib/src/Lib.kt",
+            &format!("fun greeting(name: String): String = \"{word} $name\"\n"),
+        );
+        wsb_build_in(&p.root);
+    }
+    for (p, word) in projects.iter().zip(["first", "second"]) {
+        let classes = p.classes();
+        let lib = classes
+            .iter()
+            .find(|(path, _)| path.ends_with("LibKt.class"))
+            .unwrap_or_else(|| panic!("no LibKt.class in {}: {classes:?}", p.root.display()));
+        let text = String::from_utf8_lossy(lib.1);
+        assert!(
+            text.contains(word),
+            "{} holds the wrong code",
+            p.root.display()
+        );
+        assert!(classes.keys().any(|k| k.ends_with("MainKt.class")));
+    }
 }

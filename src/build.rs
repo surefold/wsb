@@ -71,8 +71,20 @@ pub struct Options {
 pub struct Jvm;
 
 impl Jvm {
-    /// The version of `kotlinc` on the `PATH`, if it can be found.
+    /// The version of `kotlinc` on the `PATH`, if it can be found: read
+    /// from the installation if possible, which needs no JVM.
     pub fn kotlin_version() -> Option<String> {
+        static VERSION: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        VERSION
+            .get_or_init(|| {
+                crate::daemon::KotlinHome::find()
+                    .and_then(|home| home.version())
+                    .or_else(Jvm::ask_kotlinc_version)
+            })
+            .clone()
+    }
+
+    fn ask_kotlinc_version() -> Option<String> {
         let output = Command::new("kotlinc").arg("-version").output().ok()?;
         let text = String::from_utf8_lossy(&output.stderr).into_owned()
             + &String::from_utf8_lossy(&output.stdout);
@@ -110,52 +122,158 @@ impl Tools for Jvm {
     }
 
     fn compile(&self, r: &CompileRequest) -> Result<String, String> {
-        let building = r.out.with_extension("building");
-        if building.exists() {
-            fs::remove_dir_all(&building).map_err(|e| e.to_string())?;
-        }
-        fs::create_dir_all(&building).map_err(|e| e.to_string())?;
-        let mut command = Command::new("kotlinc");
-        command
-            .args(&r.sources)
-            .arg("-d")
-            .arg(&building)
-            .arg("-jvm-target")
-            .arg(r.jvm_target.to_string());
-        if !r.classpath.is_empty() {
-            let parts: Vec<&std::ffi::OsStr> = r.classpath.iter().map(|p| p.as_os_str()).collect();
-            command
-                .arg("-cp")
-                .arg(parts.join(std::ffi::OsStr::new(":")));
-        }
-        if r.warnings_as_errors {
-            command.arg("-Werror");
-        }
-        command.args(&r.args);
-        let output = launch("kotlinc", &mut command)?;
-        if !output.status.success() {
-            let _ = fs::remove_dir_all(&building);
-            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-        }
-        if r.out.exists() {
-            fs::remove_dir_all(&r.out).map_err(|e| e.to_string())?;
-        }
-        fs::rename(&building, &r.out).map_err(|e| e.to_string())?;
-        // The body of an inline function is copied into its callers.
-        let mut inline = false;
-        for source in &r.sources {
-            let text = fs::read_to_string(source).map_err(|e| e.to_string())?;
-            inline |= text.contains("inline");
-        }
-        abi::of_dir(&r.out, inline)
+        compile_with(r, |args| {
+            let output = launch("kotlinc", Command::new("kotlinc").args(args))?;
+            if output.status.success() {
+                Ok(())
+            } else {
+                Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+            }
+        })
     }
 
     fn compiler(&self) -> String {
-        static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-        VERSION
-            .get_or_init(|| Jvm::kotlin_version().unwrap_or_default())
-            .clone()
+        Jvm::kotlin_version().unwrap_or_default()
     }
+}
+
+/// Like [`Jvm`], but compiles in a [compile server](crate::daemon) that
+/// keeps the compiler loaded between compiles and between builds. If the
+/// server cannot be used, it runs `kotlinc` as `Jvm` does.
+pub struct WarmJvm {
+    daemon: Option<crate::daemon::Daemon>,
+    /// Why the server is not used, said once.
+    fallback: std::sync::Once,
+    why_not: Option<String>,
+}
+
+impl WarmJvm {
+    pub fn new() -> WarmJvm {
+        WarmJvm::with_idle(crate::daemon::IDLE)
+    }
+
+    /// A server this starts exits after `idle` with nothing to do.
+    pub fn with_idle(idle: Duration) -> WarmJvm {
+        let daemon = crate::daemon::KotlinHome::find()
+            .ok_or_else(|| "could not find the Kotlin installation of `kotlinc`".to_string())
+            .and_then(|home| crate::daemon::Daemon::new(home).map_err(|e| e.to_string()))
+            .map(|d| d.with_idle(idle));
+        match daemon {
+            Ok(d) => WarmJvm {
+                daemon: Some(d),
+                fallback: std::sync::Once::new(),
+                why_not: None,
+            },
+            Err(e) => WarmJvm {
+                daemon: None,
+                fallback: std::sync::Once::new(),
+                why_not: Some(e),
+            },
+        }
+    }
+
+    fn fall_back(&self, why: &str) {
+        self.fallback.call_once(|| {
+            eprintln!("note: compiling with `kotlinc` instead of the compile server: {why}");
+        });
+    }
+}
+
+impl Default for WarmJvm {
+    fn default() -> Self {
+        WarmJvm::new()
+    }
+}
+
+impl Tools for WarmJvm {
+    fn resolve(&self, coordinates: &[String]) -> Result<Vec<PathBuf>, String> {
+        Jvm.resolve(coordinates)
+    }
+
+    fn compile(&self, r: &CompileRequest) -> Result<String, String> {
+        let Some(daemon) = &self.daemon else {
+            self.fall_back(self.why_not.as_deref().unwrap_or("unavailable"));
+            return Jvm.compile(r);
+        };
+        // The server runs in a folder of its own, so it is given absolute
+        // paths, and what it prints is made relative again, as `kotlinc`
+        // would print it.
+        let here = std::env::current_dir().map_err(|e| e.to_string())?;
+        let absolute = |p: &PathBuf| here.join(p);
+        let r = &CompileRequest {
+            sources: r.sources.iter().map(absolute).collect(),
+            classpath: r.classpath.iter().map(absolute).collect(),
+            out: absolute(&r.out),
+            ..r.clone()
+        };
+        let prefix = format!("{}/", here.display());
+        let mut unusable = None;
+        let result = compile_with(r, |args| match daemon.compile(args) {
+            Ok(c) if c.ok => Ok(()),
+            Ok(c) if c.crashed => {
+                unusable = Some(format!("the compile server failed: {}", c.printed));
+                Err(String::new())
+            }
+            Ok(c) => Err(c.printed.replace(&prefix, "")),
+            Err(e) => {
+                unusable = Some(e.to_string());
+                Err(String::new())
+            }
+        });
+        match unusable {
+            Some(why) => {
+                self.fall_back(&why);
+                Jvm.compile(r)
+            }
+            None => result,
+        }
+    }
+
+    fn compiler(&self) -> String {
+        Jvm.compiler()
+    }
+}
+
+/// Compiles into a fresh folder with `run`, given `kotlinc`'s arguments,
+/// then moves the classes into place and hashes their public API.
+fn compile_with(
+    r: &CompileRequest,
+    run: impl FnOnce(&[std::ffi::OsString]) -> Result<(), String>,
+) -> Result<String, String> {
+    let building = r.out.with_extension("building");
+    if building.exists() {
+        fs::remove_dir_all(&building).map_err(|e| e.to_string())?;
+    }
+    fs::create_dir_all(&building).map_err(|e| e.to_string())?;
+    let mut args: Vec<std::ffi::OsString> = r.sources.iter().map(|s| s.clone().into()).collect();
+    args.push("-d".into());
+    args.push(building.clone().into());
+    args.push("-jvm-target".into());
+    args.push(r.jvm_target.to_string().into());
+    if !r.classpath.is_empty() {
+        let parts: Vec<&std::ffi::OsStr> = r.classpath.iter().map(|p| p.as_os_str()).collect();
+        args.push("-cp".into());
+        args.push(parts.join(std::ffi::OsStr::new(":")));
+    }
+    if r.warnings_as_errors {
+        args.push("-Werror".into());
+    }
+    args.extend(r.args.iter().map(Into::into));
+    if let Err(e) = run(&args) {
+        let _ = fs::remove_dir_all(&building);
+        return Err(e);
+    }
+    if r.out.exists() {
+        fs::remove_dir_all(&r.out).map_err(|e| e.to_string())?;
+    }
+    fs::rename(&building, &r.out).map_err(|e| e.to_string())?;
+    // The body of an inline function is copied into its callers.
+    let mut inline = false;
+    for source in &r.sources {
+        let text = fs::read_to_string(source).map_err(|e| e.to_string())?;
+        inline |= text.contains("inline");
+    }
+    abi::of_dir(&r.out, inline)
 }
 
 /// What a build did with one module.
